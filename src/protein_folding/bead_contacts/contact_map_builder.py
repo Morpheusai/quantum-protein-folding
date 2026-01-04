@@ -12,7 +12,8 @@ import collections
 import logging
 from typing import Tuple, Dict, Union
 
-from qiskit.opflow import PauliSumOp, OperatorBase, PauliOp
+from qiskit.quantum_info import SparsePauliOp, Pauli
+from qiskit.quantum_info.operators.base_operator import BaseOperator
 
 from ..peptide.pauli_ops_builder import (
     _build_pauli_z_op,
@@ -60,16 +61,16 @@ def _create_contact_qubits(
     main_chain_len = len(peptide.get_main_chain)
     side_chain = peptide.get_side_chain_hot_vector()
 
-    lower_main_upper_main: Dict[int, Dict[int, OperatorBase]] = collections.defaultdict(
+    lower_main_upper_main: Dict[int, Dict[int, BaseOperator]] = collections.defaultdict(
         dict
     )
-    lower_side_upper_main: Dict[int, Dict[int, OperatorBase]] = collections.defaultdict(
+    lower_side_upper_main: Dict[int, Dict[int, BaseOperator]] = collections.defaultdict(
         dict
     )
-    lower_main_upper_side: Dict[int, Dict[int, OperatorBase]] = collections.defaultdict(
+    lower_main_upper_side: Dict[int, Dict[int, BaseOperator]] = collections.defaultdict(
         dict
     )
-    lower_side_upper_side: Dict[int, Dict[int, OperatorBase]] = collections.defaultdict(
+    lower_side_upper_side: Dict[int, Dict[int, BaseOperator]] = collections.defaultdict(
         dict
     )
 
@@ -163,10 +164,10 @@ def _create_contact_op_for_axis(
     contact_op_block_position: int,
     lower_bead_id: int,
     upper_bead_id: int,
-    full_id: PauliOp,
+    full_id: Pauli,
     main_chain_len: int,
     num_qubits: int,
-) -> PauliOp:
+) -> Pauli:
     z_op_index = _calc_index(main_chain_len - 1, lower_bead_id - 1, upper_bead_id - 1)
     contact_op = _build_pauli_z_op(num_qubits, {z_op_index})
     # we have 4 block positions for all combinations of main and side chain beads (main-main,
@@ -210,8 +211,8 @@ def _calc_index(chain_len: int, lower_bead_pos: int, upper_bead_pos: int) -> int
 
 
 def _convert_to_qubits(
-    pauli_sum_op: Union[PauliSumOp, PauliOp]
-) -> Union[PauliSumOp, PauliOp]:
+    pauli_sum_op: Union[SparsePauliOp, Pauli]
+) -> Union[SparsePauliOp, Pauli]:
     num_qubits_num = pauli_sum_op.num_qubits
     full_id = _build_full_identity(num_qubits_num)
     return (full_id - pauli_sum_op) / 2.0

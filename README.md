@@ -1,8 +1,18 @@
-> [!IMPORTANT]  
-> This code is not actively maintained. Issues are not monitored, and pull requests are not accepted. This project is archived. Forking is allowed under the license conditions.
+# Install
+```
+conda create -n duneq python=3.12
+pip3 install -r requirements.txt
+conda activate duneq
+```
 
-# quantum-protein-folding
+# Run
+```
+# use default backend
+python run_protein_folding.py 
 
-Code for the paper [*Resource-efficient quantum algorithm for protein folding*](https://www.nature.com/articles/s41534-021-00368-4).
+# use aws sv1 or pc
+python run_protein_folding.py --backend="aws"
 
-This experiment simulates protein folding on the IBM Quantum hardware.
+# use ibm
+python run_protein_folding.py --backend="ibm"
+```

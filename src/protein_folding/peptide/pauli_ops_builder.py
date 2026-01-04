@@ -10,10 +10,9 @@
 """Builds Pauli operators of a given size."""
 from typing import Set
 
-from qiskit.opflow import PauliOp, I, Z
+from qiskit.quantum_info import Pauli, SparsePauliOp
 
-
-def _build_full_identity(num_qubits: int) -> PauliOp:
+def _build_full_identity(num_qubits: int) -> SparsePauliOp:
     """
     Builds a full identity operator of a given size.
 
@@ -23,13 +22,12 @@ def _build_full_identity(num_qubits: int) -> PauliOp:
     Returns:
         A full identity operator of a given size.
     """
-    full_identity = I
-    for _ in range(1, num_qubits):
-        full_identity = I ^ full_identity
-    return full_identity
+    # 创建全I的Pauli字符串
+    pauli_label = 'I' * num_qubits
+    # 使用SparsePauliOp创建（系数为1.0）
+    return SparsePauliOp(pauli_label, coeffs=1.0)
 
-
-def _build_pauli_z_op(num_qubits: int, pauli_z_indices: Set[int]) -> PauliOp:
+def _build_pauli_z_op(num_qubits: int, pauli_z_indices: Set[int]) -> SparsePauliOp:
     """
     Builds a Pauli operator of a given size with Pauli Z operators on indicated positions and
     identity operators on other positions.
@@ -44,13 +42,13 @@ def _build_pauli_z_op(num_qubits: int, pauli_z_indices: Set[int]) -> PauliOp:
         identity operators on other positions.
     """
     if 0 in pauli_z_indices:
-        operator = Z
+        operator = Pauli('Z')
     else:
-        operator = I
+        operator = Pauli('I')
     for i in range(1, num_qubits):
         if i in pauli_z_indices:
-            operator = Z ^ operator
+            operator = Pauli('Z') ^ operator
         else:
-            operator = I ^ operator
+            operator = Pauli('I') ^ operator
 
-    return operator
+    return SparsePauliOp(operator, coeffs=1.0)

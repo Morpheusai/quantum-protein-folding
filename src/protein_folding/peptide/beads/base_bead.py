@@ -11,7 +11,8 @@
 from abc import ABC
 from typing import Tuple, Union, Callable, Optional
 
-from qiskit.opflow import PauliOp, OperatorBase
+from qiskit.quantum_info import Pauli
+from qiskit.quantum_info.operators.base_operator import BaseOperator
 
 from ..pauli_ops_builder import _build_full_identity
 from ...residue_validator import _validate_residue_symbol
@@ -25,11 +26,11 @@ class BaseBead(ABC):
         chain_type: str,
         main_index: int,
         residue_type: Optional[str],
-        turn_qubits: Tuple[PauliOp, PauliOp],
-        build_turn_indicator_fun_0: Callable[[], OperatorBase],
-        build_turn_indicator_fun_1: Callable[[], OperatorBase],
-        build_turn_indicator_fun_2: Callable[[], OperatorBase],
-        build_turn_indicator_fun_3: Callable[[], OperatorBase],
+        turn_qubits: Tuple[Pauli, Pauli],
+        build_turn_indicator_fun_0: Callable[[], BaseOperator],
+        build_turn_indicator_fun_1: Callable[[], BaseOperator],
+        build_turn_indicator_fun_2: Callable[[], BaseOperator],
+        build_turn_indicator_fun_3: Callable[[], BaseOperator],
     ):
         """
         Args:
@@ -73,7 +74,7 @@ class BaseBead(ABC):
             self._turn_indicator_fun_3 = build_turn_indicator_fun_3()
 
     @property
-    def turn_qubits(self) -> Tuple[PauliOp, PauliOp]:
+    def turn_qubits(self) -> Tuple[Pauli, Pauli]:
         """Returns the list of two qubits that encode the turn following from the bead."""
         return self._turn_qubits
 
@@ -86,7 +87,7 @@ class BaseBead(ABC):
     @property
     def indicator_functions(
         self,
-    ) -> Union[None, Tuple[OperatorBase, OperatorBase, OperatorBase, OperatorBase]]:
+    ) -> Union[None, Tuple[BaseOperator, BaseOperator, BaseOperator, BaseOperator]]:
         """
         Returns all turn indicator functions for the bead.
         Returns:

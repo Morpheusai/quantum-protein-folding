@@ -10,7 +10,8 @@
 """A class defining a main bead of a peptide."""
 from typing import Tuple
 
-from qiskit.opflow import PauliOp, OperatorBase
+from qiskit.quantum_info import Pauli
+from qiskit.quantum_info.operators.base_operator import BaseOperator
 
 from .base_bead import BaseBead
 from ..chains.side_chain import SideChain
@@ -23,7 +24,7 @@ class MainBead(BaseBead):
         self,
         main_index: int,
         residue_type: str,
-        turn_qubits: Tuple[PauliOp, PauliOp],
+        turn_qubits: Tuple[Pauli, Pauli],
         side_chain: SideChain,
     ):
         """
@@ -59,29 +60,29 @@ class MainBead(BaseBead):
             self.main_index == other.main_index and self.chain_type == other.chain_type
         )
 
-    def _build_turn_indicator_fun_0(self) -> OperatorBase:
+    def _build_turn_indicator_fun_0(self) -> BaseOperator:
         return (
             self._full_id
             ^ (
                 (self._full_id - self._turn_qubits[0])
                 @ (self._full_id - self._turn_qubits[1])
             )
-        ).reduce()
+        ).simplify()
 
-    def _build_turn_indicator_fun_1(self) -> OperatorBase:
+    def _build_turn_indicator_fun_1(self) -> BaseOperator:
         return (
             self._full_id
             ^ (self._turn_qubits[1] @ (self._turn_qubits[1] - self._turn_qubits[0]))
-        ).reduce()
+        ).simplify()
 
-    def _build_turn_indicator_fun_2(self) -> OperatorBase:
+    def _build_turn_indicator_fun_2(self) -> BaseOperator:
         return (
             self._full_id
             ^ (self._turn_qubits[0] @ (self._turn_qubits[0] - self._turn_qubits[1]))
-        ).reduce()
+        ).simplify()
 
-    def _build_turn_indicator_fun_3(self) -> OperatorBase:
-        return (self._full_id ^ (self._turn_qubits[0] @ self._turn_qubits[1])).reduce()
+    def _build_turn_indicator_fun_3(self) -> BaseOperator:
+        return (self._full_id ^ (self._turn_qubits[0] @ self._turn_qubits[1])).simplify()
 
     @property
     def side_chain(self) -> SideChain:

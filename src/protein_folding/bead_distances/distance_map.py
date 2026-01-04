@@ -11,7 +11,8 @@
 from typing import Union, Tuple, DefaultDict, Dict
 import numpy as np
 
-from qiskit.opflow import PauliSumOp, PauliOp, OperatorBase
+from qiskit.quantum_info import SparsePauliOp, Pauli
+from qiskit.quantum_info.operators.base_operator import BaseOperator
 
 from .distance_map_builder import DistanceMapBuilder
 from ..peptide.beads.base_bead import BaseBead
@@ -34,7 +35,7 @@ class DistanceMap:
             self._num_distances,
         ) = DistanceMapBuilder().create_distance_qubits(peptide)
 
-    def __getitem__(self, position: Tuple[BaseBead, BaseBead]) -> OperatorBase:
+    def __getitem__(self, position: Tuple[BaseBead, BaseBead]) -> BaseOperator:
         item1, item2 = position
         return self._distance_map[item1][item2]
 
@@ -44,7 +45,7 @@ class DistanceMap:
         return self._peptide
 
     @property
-    def distance_map(self) -> DefaultDict[BaseBead, Dict[BaseBead, OperatorBase]]:
+    def distance_map(self) -> DefaultDict[BaseBead, Dict[BaseBead, BaseOperator]]:
         """Returns a distance map."""
         return self._distance_map
 
@@ -63,7 +64,7 @@ class DistanceMap:
         lambda_1: float,
         pair_energies: np.ndarray,
         pair_energies_multiplier: float = 0.1,
-    ) -> Union[PauliSumOp, PauliOp]:
+    ) -> Union[SparsePauliOp, Pauli]:
         """
         Creates first nearest neighbor interaction if beads are in contact
         and at a distance of 1 unit from each other. Otherwise, a large positive
@@ -112,7 +113,7 @@ class DistanceMap:
         lambda_1: float,
         pair_energies: np.ndarray,
         pair_energies_multiplier: float = 0.1,
-    ) -> Union[PauliSumOp, PauliOp]:
+    ) -> Union[SparsePauliOp, Pauli]:
         """
         Creates energetic interaction that penalizes local overlap between
         beads that correspond to a nearest neighbor contact or adds no net

@@ -10,7 +10,7 @@
 """A class defining a random interaction between beads of a peptide."""
 
 import numpy as np
-from qiskit.utils import algorithm_globals
+from qiskit_algorithms.utils import algorithm_globals
 
 from .interaction import Interaction
 

@@ -11,13 +11,13 @@
 from typing import Union, List, Dict, Tuple
 
 import numpy as np
-from qiskit.opflow import PauliSumOp, PauliOp, OperatorBase
-from qiskit.quantum_info import PauliTable, SparsePauliOp, Pauli
 
+from qiskit.quantum_info.operators.base_operator import BaseOperator
+from qiskit.quantum_info import PauliList, SparsePauliOp, Pauli
 
 def remove_unused_qubits(
-    total_hamiltonian: Union[PauliSumOp, PauliOp]
-) -> Tuple[Union[PauliSumOp, PauliOp], List[int]]:
+    total_hamiltonian: Union[SparsePauliOp, Pauli]
+) -> Tuple[Union[SparsePauliOp, Pauli], List[int]]:
     """
     Removes those qubits from a total Hamiltonian that are equal to an identity operator across
     all terms, i.e. they are irrelevant for the problem. It makes the number of qubits required
@@ -32,13 +32,14 @@ def remove_unused_qubits(
     """
     unused_qubits = _find_unused_qubits(total_hamiltonian)
     num_qubits = total_hamiltonian.num_qubits
-    if isinstance(total_hamiltonian, PauliOp):
+    print(f"num_qubits: {num_qubits}, unused_qubits: {len(unused_qubits)}")
+    if isinstance(total_hamiltonian, Pauli):
         return (
             _compress_pauli_op(num_qubits, total_hamiltonian, unused_qubits),
             unused_qubits,
         )
 
-    if isinstance(total_hamiltonian, PauliSumOp):
+    if isinstance(total_hamiltonian, SparsePauliOp):
         return (
             _compress_pauli_sum_op(num_qubits, total_hamiltonian, unused_qubits),
             unused_qubits,
@@ -48,39 +49,43 @@ def remove_unused_qubits(
 
 def _compress_pauli_op(
     num_qubits: int,
-    total_hamiltonian: Union[PauliSumOp, PauliOp, OperatorBase],
+    total_hamiltonian: Union[SparsePauliOp, Pauli, BaseOperator],
     unused_qubits: List[int],
-) -> Union[PauliOp, OperatorBase]:
+) -> Union[Pauli, BaseOperator]:
     table_z = total_hamiltonian.primitive.z
     table_x = total_hamiltonian.primitive.x
     new_table_z, new_table_x = _calc_reduced_pauli_tables(
         num_qubits, table_x, table_z, unused_qubits
     )
-    total_hamiltonian_compressed = PauliOp(Pauli((new_table_z, new_table_x)))
+    total_hamiltonian_compressed = Pauli((new_table_z, new_table_x))
     return total_hamiltonian_compressed
 
 
 def _compress_pauli_sum_op(
     num_qubits: int,
-    total_hamiltonian: Union[PauliSumOp, PauliOp, OperatorBase],
+    total_hamiltonian: Union[SparsePauliOp, Pauli, BaseOperator],
     unused_qubits: List[int],
-) -> Union[PauliSumOp, PauliOp, OperatorBase]:
+) -> Union[SparsePauliOp, Pauli, BaseOperator]:
     new_tables = []
     new_coeffs = []
     for term in total_hamiltonian:
-        table_z = term.primitive.paulis.z[0]
-        table_x = term.primitive.paulis.x[0]
-        coeffs = term.primitive.coeffs[0]
+        table_z = term.paulis.z[0]
+        table_x = term.paulis.x[0]
+        coeffs = term.coeffs[0]
         new_table_z, new_table_x = _calc_reduced_pauli_tables(
             num_qubits, table_x, table_z, unused_qubits
         )
         new_table = np.concatenate((new_table_x, new_table_z), axis=0)
         new_tables.append(new_table)
         new_coeffs.append(coeffs)
-    new_pauli_table = PauliTable(data=new_tables)
-    total_hamiltonian_compressed = PauliSumOp(
-        SparsePauliOp(data=new_pauli_table, coeffs=new_coeffs)
-    ).reduce()
+    #new_pauli_table = PauliList(data=new_tables)
+    #total_hamiltonian_compressed = SparsePauliOp(data=new_pauli_table, coeffs=new_coeffs).simplify()
+    new_pauli_list = PauliList.from_symplectic(
+        z=np.array([table[table.shape[0]//2:] for table in new_tables]),
+        x=np.array([table[:table.shape[0]//2] for table in new_tables])
+    )
+    # 创建 SparsePauliOp
+    total_hamiltonian_compressed = SparsePauliOp(new_pauli_list, coeffs=new_coeffs)
     return total_hamiltonian_compressed
 
 
@@ -97,17 +102,17 @@ def _calc_reduced_pauli_tables(
     return new_table_z, new_table_x
 
 
-def _find_unused_qubits(total_hamiltonian: Union[PauliSumOp, PauliOp]) -> List[int]:
+def _find_unused_qubits(total_hamiltonian: Union[SparsePauliOp, Pauli]) -> List[int]:
     used_map: Dict[int, bool] = {}
     unused = []
     num_qubits = total_hamiltonian.num_qubits
-    if isinstance(total_hamiltonian, PauliOp):
+    if isinstance(total_hamiltonian, Pauli):
         table_z = total_hamiltonian.primitive.z
         _update_used_map(num_qubits, table_z, used_map)
 
-    elif isinstance(total_hamiltonian, PauliSumOp):
+    elif isinstance(total_hamiltonian, SparsePauliOp):
         for term in total_hamiltonian:
-            table_z = term.primitive.paulis.z[0]
+            table_z = term.paulis.z[0]
             _update_used_map(num_qubits, table_z, used_map)
 
     for ind in range(num_qubits):

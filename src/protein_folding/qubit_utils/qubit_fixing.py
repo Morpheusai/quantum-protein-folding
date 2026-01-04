@@ -11,14 +11,14 @@
 from typing import Union
 
 import numpy as np
-from qiskit.opflow import PauliSumOp, OperatorBase, PauliOp
-from qiskit.quantum_info import PauliTable, SparsePauliOp, Pauli
+from qiskit.quantum_info.operators.base_operator import BaseOperator
+from qiskit.quantum_info import PauliList, SparsePauliOp, Pauli
 
 
 def _fix_qubits(
-    operator: Union[int, PauliSumOp, PauliOp, OperatorBase],
+    operator: Union[int, SparsePauliOp, Pauli, BaseOperator],
     has_side_chain_second_bead: bool = False,
-) -> Union[int, PauliSumOp, PauliOp, OperatorBase]:
+) -> Union[int, SparsePauliOp, Pauli, BaseOperator]:
     """
     Assigns predefined values for turns qubits on positions 0, 1, 2, 3, 5 in the main chain
     without the loss of generality (see the paper https://arxiv.org/pdf/1908.02163.pdf). Qubits
@@ -33,40 +33,44 @@ def _fix_qubits(
     # operator might be 0 (int) because it is initialized as operator = 0; then we should not
     # attempt fixing qubits
     if (
-        not isinstance(operator, PauliOp)
-        and not isinstance(operator, PauliSumOp)
-        and not isinstance(operator, OperatorBase)
+        not isinstance(operator, Pauli)
+        and not isinstance(operator, SparsePauliOp)
+        and not isinstance(operator, BaseOperator)
     ):
         return operator
-    operator = operator.reduce()
+    operator = operator.simplify()
     new_tables = []
     new_coeffs = []
-    if isinstance(operator, PauliOp):
+    if isinstance(operator, Pauli):
         table_z = np.copy(operator.primitive.z)
         table_x = np.copy(operator.primitive.x)
         _preset_binary_vals(table_z, has_side_chain_second_bead)
-        return PauliOp(Pauli((table_z, table_x)))
+        return Pauli((table_z, table_x))
 
     for hamiltonian in operator:
-        table_z = np.copy(hamiltonian.primitive.paulis.z[0])
-        table_x = np.copy(hamiltonian.primitive.paulis.x[0])
+        table_z = np.copy(hamiltonian.paulis.z[0])
+        table_x = np.copy(hamiltonian.paulis.x[0])
         coeffs = _calc_updated_coeffs(hamiltonian, table_z, has_side_chain_second_bead)
         _preset_binary_vals(table_z, has_side_chain_second_bead)
         new_table = np.concatenate((table_x, table_z), axis=0)
         new_tables.append(new_table)
         new_coeffs.append(coeffs)
-    new_pauli_table = PauliTable(data=new_tables)
-    operator_updated = PauliSumOp(
-        SparsePauliOp(data=new_pauli_table, coeffs=new_coeffs)
+
+    #new_pauli_table = PauliList(data=new_tables)
+    #operator_updated = SparsePauliOp(data=new_pauli_table, coeffs=new_coeffs)
+    new_pauli_list = PauliList.from_symplectic(
+        z=np.array([table[table.shape[0]//2:] for table in new_tables]),
+        x=np.array([table[:table.shape[0]//2] for table in new_tables])
     )
-    operator_updated = operator_updated.reduce()
+    operator_updated = SparsePauliOp(new_pauli_list, coeffs=new_coeffs)
+    operator_updated = operator_updated.simplify()
     return operator_updated
 
 
 def _calc_updated_coeffs(
-    hamiltonian: Union[PauliSumOp, PauliOp], table_z, has_side_chain_second_bead: bool
+    hamiltonian: Union[SparsePauliOp, Pauli], table_z, has_side_chain_second_bead: bool
 ) -> np.ndarray:
-    coeffs = np.copy(hamiltonian.primitive.coeffs[0])
+    coeffs = np.copy(hamiltonian.coeffs[0])
     if len(table_z) > 1 and table_z[1] == np.bool_(True):
         coeffs = -1 * coeffs
     if (

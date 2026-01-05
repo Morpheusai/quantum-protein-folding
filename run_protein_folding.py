@@ -8,6 +8,8 @@ import argparse
 import os
 import sys
 import warnings
+import datetime
+import json
 
 # 设置UTF-8环境以解决Windows编码问题
 if os.name == 'nt':  # Windows系统
@@ -23,28 +25,48 @@ warnings.filterwarnings('ignore')
 # ====================
 parser = argparse.ArgumentParser(description='量子计算参数')
 parser.add_argument('--backend', default='local', help='量子后端名称 (默认: local)')
+parser.add_argument('--random_seed', type=int, default=23, help='随机种子 (默认: 23)')
+parser.add_argument('--max_optimization_iterations', type=int, default=50, help='最大优化迭代次数 (默认: 50)')
+parser.add_argument('--ansatz_reps', type=int, default=1, help='变分电路重复次数 (默认: 1)')
+parser.add_argument('--main_chain', default='APRLRFY', help='主链序列 (默认: APRLRFY)')
+parser.add_argument('--penalty_back', type=float, default=10, help='几何约束惩罚参数 (默认: 10)')
+parser.add_argument('--penalty_chiral', type=float, default=10, help='手性约束惩罚参数 (默认: 10)')
+parser.add_argument('--penalty_local_overlap', type=float, default=10, help='局部重叠惩罚参数 (默认: 10)')
+parser.add_argument('--save_plot_png', type=bool, default=True, help='是否保存PNG格式图形 (默认: True)')
+parser.add_argument('--save_plot_pdf', type=bool, default=False, help='是否保存PDF格式图形 (默认: True)')
+parser.add_argument('--plot_dpi', type=int, default=300, help='PNG图形分辨率 (默认: 300)')
+parser.add_argument('--shots', type=int, default=1000, help='量子电路采样次数 (默认: 1000)')
+parser.add_argument('--max_results', type=int, default=1, help='输出最优结果的数量 (默认: 1, 最大值: 5)')
 args = parser.parse_args()
 
 # 量子计算参数
 #QUANTUM_BACKEND = os.getenv('QUANTUM_BACKEND', 'local')  # 'local', 'aws_sv1', 'aws_garnet'
 QUANTUM_BACKEND = args.backend
-RANDOM_SEED = 23  # 随机种子
-MAX_OPTIMIZATION_ITERATIONS = 50  # 最大优化迭代次数
-ANSATZ_REPS = 1  # 变分电路重复次数
+RANDOM_SEED = args.random_seed
+MAX_OPTIMIZATION_ITERATIONS = args.max_optimization_iterations
+ANSATZ_REPS = args.ansatz_reps
 
 # 蛋白质结构参数
-MAIN_CHAIN = "APRLRFY"  # 主链序列
-SIDE_CHAINS = [""] * 7  # 侧链序列（本例中不考虑侧链）
+MAIN_CHAIN = args.main_chain
+SIDE_CHAINS = [""] * len(MAIN_CHAIN)  # 侧链序列（本例中不考虑侧链）
 
 # 物理约束参数
-PENALTY_BACK = 10  # 几何约束惩罚参数
-PENALTY_CHIRAL = 10  # 手性约束惩罚参数
-PENALTY_LOCAL_OVERLAP = 10  # 局部重叠惩罚参数
+PENALTY_BACK = args.penalty_back
+PENALTY_CHIRAL = args.penalty_chiral
+PENALTY_LOCAL_OVERLAP = args.penalty_local_overlap
 
 # 输出设置
-SAVE_PLOT_PNG = True  # 是否保存PNG格式图形
-SAVE_PLOT_PDF = True  # 是否保存PDF格式图形
-PLOT_DPI = 300  # PNG图形分辨率
+SAVE_PLOT_PNG = args.save_plot_png
+SAVE_PLOT_PDF = args.save_plot_pdf
+PLOT_DPI = args.plot_dpi
+SHOTS = args.shots
+MAX_RESULTS = min(args.max_results, 5)  # 最多输出5个结果
+
+# 创建结果目录
+TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+RESULT_DIR = os.path.join("results", f"{TIMESTAMP}_{QUANTUM_BACKEND}")
+os.makedirs(RESULT_DIR, exist_ok=True)
+print(f"✓ 结果将保存在目录: {RESULT_DIR}")
 
 # ====================
 # 参数配置结束
@@ -169,7 +191,7 @@ def main():
             backend = Aer.get_backend('qasm_simulator')
             sampler = BackendSamplerV2(
                 backend=backend,
-                options={"default_shots": 1000}  # 可以设置 shots 数量
+                options={"default_shots": SHOTS}  # 使用命令行参数设置 shots 数量
             )
             #sampler = SamplerV2()
             #sampler = Sampler()
@@ -191,22 +213,52 @@ def main():
         )
         print("✓ VQE初始化完成")
         
-        # 计算最小特征值
-        print("正在计算最小特征值...")
+        # 计算多个最优结果
+        print(f"正在计算最多 {MAX_RESULTS} 个最优结果...")
         print(f"  - 使用优化器: {type(optimizer).__name__}")
-        print(f"  - 最大迭代次数: 50")  # 代码中设置的值
+        print(f"  - 最大迭代次数: {MAX_OPTIMIZATION_ITERATIONS}")
         print(f"  - 量子电路重复次数: {ansatz_reps}")
-        raw_result = vqe.compute_minimum_eigenvalue(qubit_op)
-        #raw_result = MinimumEigenOptimizer(vqe)
-        print("✓ 计算完成")
+        print(f"  - 量子采样次数: {SHOTS}")
+        
+        # 存储多个结果
+        all_results = []
+        all_energies = []
+        
+        # 运行多次VQE以获取多个结果
+        for i in range(MAX_RESULTS):
+            print(f"  - 正在计算第 {i+1}/{MAX_RESULTS} 个结果...")
+            
+            # 为每次运行设置不同的随机种子
+            algorithm_globals.random_seed = RANDOM_SEED + i
+            
+            # 重新初始化VQE以确保每次运行不同
+            vqe = SamplingVQE(
+                sampler=sampler,
+                ansatz=ansatz,
+                optimizer=optimizer,
+                aggregation=0.1,
+                callback=store_intermediate_result,
+            )
+            
+            # 计算最小特征值
+            raw_result = vqe.compute_minimum_eigenvalue(qubit_op)
+            
+            # 解释结果
+            result = protein_folding_problem.interpret(raw_result=raw_result)
+            
+            # 存储结果和能量
+            all_results.append(result)
+            all_energies.append(raw_result.eigenvalue.real)
+            
+            print(f"  - 第 {i+1} 个结果能量: {raw_result.eigenvalue.real:.6f}")
+        
+        print("✓ 多结果计算完成")
         
         # 显示量子计算统计信息
         print(f"  - 量子电路深度: {ansatz.decompose().depth()}")
         print(f"  - 量子比特数量: {ansatz.num_qubits}")
         print(f"  - 量子门数量: {ansatz.decompose().size()}")
         print(f"  - 总函数评估次数: {len(counts)}")
-        if len(counts) > 0:
-            print(f"  - 最终能量: {values[-1]:.6f}")
         
         # 绘制VQE优化过程的折线图（如果环境支持）
         try:
@@ -230,12 +282,14 @@ def main():
             
             # 保存优化过程图
             if SAVE_PLOT_PNG:
-                plt.savefig('vqe_optimization_process.png', dpi=PLOT_DPI, bbox_inches='tight')
-                print(f"✓ VQE优化过程图已保存为 vqe_optimization_process.png (DPI: {PLOT_DPI})")
+                plot_path = os.path.join(RESULT_DIR, f'vqe_optimization_process_{QUANTUM_BACKEND}.png')
+                plt.savefig(plot_path, dpi=PLOT_DPI, bbox_inches='tight')
+                print(f"✓ VQE优化过程图已保存为 {plot_path} (DPI: {PLOT_DPI})")
             
             if SAVE_PLOT_PDF:
-                plt.savefig('vqe_optimization_process.pdf', bbox_inches='tight')
-                print("✓ VQE优化过程图已保存为 vqe_optimization_process.pdf")
+                plot_path = os.path.join(RESULT_DIR, f'vqe_optimization_process_{QUANTUM_BACKEND}.pdf')
+                plt.savefig(plot_path, bbox_inches='tight')
+                print(f"✓ VQE优化过程图已保存为 {plot_path}")
             
             # 在非交互式环境中，我们只保存图片而不显示
             plt.close()  # 关闭图形以释放内存
@@ -246,44 +300,84 @@ def main():
         except Exception as e:
             print(f"⚠ 生成VQE优化过程折线图时出错: {e}")
         
-        # 解释结果
-        print("\n正在解释结果...")
-        result = protein_folding_problem.interpret(raw_result=raw_result)
-        print(f"✓ 蛋白质形状解码完成")
-        print(f"  - 折叠蛋白的主链转向序列: {result.protein_shape_decoder.main_turns}")
-        print(f"  - 侧链转向序列: {result.protein_shape_decoder.side_turns}")
-        print(f"  - 代表蛋白质形状的比特串: {result.turn_sequence}")
-        
-        # 获取笛卡尔坐标
-        print("\n正在获取蛋白质的笛卡尔坐标...")
-        xyz_data = result.protein_shape_file_gen.get_xyz_data()
-        print("✓ 坐标数据获取完成")
-        print("前几行坐标数据:")
-        for i, row in enumerate(xyz_data[:10]):
-            line = ' '.join(map(str, row))
-            if line.strip():
-                print(f"  {line}")
-        
-        # 显示并保存蛋白质结构的3D图形（如果环境支持）
-        try:
-            print("\n正在生成蛋白质结构的3D图形...")
-            fig = result.get_figure(title="Protein Structure", ticks=False, grid=True)
-            fig.get_axes()[0].view_init(10, 70)
+        # 处理并保存所有结果
+        for i, (result, energy) in enumerate(zip(all_results, all_energies)):
+            print(f"\n正在处理第 {i+1} 个结果 (能量: {energy:.6f})...")
             
-            # 保存图形为文件（根据配置）
-            import matplotlib.pyplot as plt
-            if SAVE_PLOT_PNG:
-                fig.savefig('protein_structure.png', dpi=PLOT_DPI, bbox_inches='tight')
-                print(f"✓ 3D图形已保存为 protein_structure.png (DPI: {PLOT_DPI})")
+            # 解释结果
+            print(f"✓ 第 {i+1} 个蛋白质形状解码完成")
+            print(f"  - 折叠蛋白的主链转向序列: {result.protein_shape_decoder.main_turns}")
+            print(f"  - 侧链转向序列: {result.protein_shape_decoder.side_turns}")
+            print(f"  - 代表蛋白质形状的比特串: {result.turn_sequence}")
             
-            if SAVE_PLOT_PDF:
-                fig.savefig('protein_structure.pdf', bbox_inches='tight')
-                print("✓ 3D图形已保存为 protein_structure.pdf")
+            # 获取笛卡尔坐标
+            print(f"\n正在获取第 {i+1} 个结果的蛋白质的笛卡尔坐标...")
+            xyz_data = result.protein_shape_file_gen.get_xyz_data()
+            print(f"✓ 第 {i+1} 个结果的坐标数据获取完成")
+            print("前几行坐标数据:")
+            for j, row in enumerate(xyz_data[:10]):
+                line = ' '.join(map(str, row))
+                if line.strip():
+                    print(f"  {line}")
             
-        except ImportError:
-            print("⚠ 无法生成3D图形 (缺少matplotlib依赖)")
-        except Exception as e:
-            print(f"⚠ 保存图形时出错: {e}")
+            # 显示并保存蛋白质结构的3D图形（如果环境支持）
+            try:
+                print(f"\n正在生成第 {i+1} 个结果的蛋白质结构的3D图形...")
+                fig = result.get_figure(title=f"Protein Structure - Result {i+1} (Energy: {energy:.4f})", ticks=False, grid=True)
+                fig.get_axes()[0].view_init(10, 70)
+                
+                # 保存图形为文件（根据配置）
+                import matplotlib.pyplot as plt
+                if SAVE_PLOT_PNG:
+                    plot_path = os.path.join(RESULT_DIR, f'protein_structure_{i+1}_energy_{energy:.4f}.png')
+                    fig.savefig(plot_path, dpi=PLOT_DPI, bbox_inches='tight')
+                    print(f"✓ 第 {i+1} 个结果的3D图形已保存为 {plot_path} (DPI: {PLOT_DPI})")
+                
+                if SAVE_PLOT_PDF:
+                    plot_path = os.path.join(RESULT_DIR, f'protein_structure_{i+1}_energy_{energy:.4f}.pdf')
+                    fig.savefig(plot_path, bbox_inches='tight')
+                    print(f"✓ 第 {i+1} 个结果的3D图形已保存为 {plot_path}")
+                
+                # 关闭图形以释放内存
+                plt.close(fig)
+                
+            except ImportError:
+                print(f"⚠ 无法生成第 {i+1} 个结果的3D图形 (缺少matplotlib依赖)")
+            except Exception as e:
+                print(f"⚠ 保存第 {i+1} 个结果的图形时出错: {e}")
+            
+            # 保存结果的核心参数为JSON文件
+            try:
+                result_data = {
+                    "result_index": i+1,
+                    "energy": energy,
+                    "main_turns": result.protein_shape_decoder.main_turns,
+                    "side_turns": result.protein_shape_decoder.side_turns,
+                    "turn_sequence": result.turn_sequence,
+                    "main_chain_sequence": MAIN_CHAIN,
+                    "side_chain_sequences": SIDE_CHAINS,
+                    "penalty_parameters": {
+                        "penalty_chiral": PENALTY_CHIRAL,
+                        "penalty_back": PENALTY_BACK,
+                        "penalty_local_overlap": PENALTY_LOCAL_OVERLAP
+                    },
+                    "quantum_parameters": {
+                        "backend": QUANTUM_BACKEND,
+                        "random_seed": RANDOM_SEED + i,
+                        "max_optimization_iterations": MAX_OPTIMIZATION_ITERATIONS,
+                        "ansatz_reps": ANSATZ_REPS,
+                        "shots": SHOTS
+                    },
+                    "xyz_coordinates": [list(row) for row in result.protein_shape_file_gen.get_xyz_data()]
+                }
+                
+                json_path = os.path.join(RESULT_DIR, f'result_{i+1}_energy_{energy:.4f}_parameters.json')
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(result_data, f, ensure_ascii=False, indent=2)
+                print(f"✓ 第 {i+1} 个结果的核心参数已保存为 {json_path}")
+                
+            except Exception as e:
+                print(f"⚠ 保存第 {i+1} 个结果的JSON参数时出错: {e}")
         
         print("\n✓ 蛋白质折叠计算完成！")
         return True

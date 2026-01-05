@@ -84,6 +84,7 @@ class ProteinPlotter:
         """
         side_positions = self._shape_gen.side_positions
         side_aminoacids = self._shape_gen.side_chain_aminoacid_list
+        side_scatter = None  # 初始化为 None
         for i, side_chain in enumerate(side_positions):
             if side_chain is not None:
                 x_side, y_side, z_side = side_chain
@@ -162,7 +163,7 @@ class ProteinPlotter:
 
         main_scatter = self._draw_main_chain()
 
-        if self._shape_gen.side_chain_aminoacid_list.any() is not None:
+        if any(pos is not None for pos in self._shape_gen.side_positions):
             side_scatter = self._draw_side_chains()
         else:
             side_scatter = None

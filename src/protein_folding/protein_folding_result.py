@@ -10,8 +10,11 @@
 
 """The protein folding result."""
 
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from qiskit.utils import optionals as _optionals
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 from . import Peptide
 from .utils.protein_plotter import ProteinPlotter
@@ -168,7 +171,7 @@ class ProteinFoldingResult:
     @_optionals.HAS_MATPLOTLIB.require_in_call
     def get_figure(
         self, title: str = "Protein Structure", ticks: bool = False, grid: bool = False
-    ) -> Figure:
+    ) -> 'Figure':
         """
         Generates a figure of the molecule in 3D.
 

@@ -87,7 +87,6 @@ def main():
         from qiskit_algorithms.optimizers import COBYLA
         from qiskit_algorithms.minimum_eigensolvers import SamplingVQE
         from qiskit_aer.primitives import Sampler, SamplerV2
-        from qiskit.primitives import BackendSamplerV2
         print("✓ 成功导入蛋白质折叠模块")
     except ImportError as e:
         print(f"✗ 导入模块失败: {e}")
@@ -189,12 +188,19 @@ def main():
         else:
             from qiskit_aer import Aer 
             backend = Aer.get_backend('qasm_simulator')
-            sampler = BackendSamplerV2(
-                backend=backend,
-                options={"default_shots": SHOTS}  # 使用命令行参数设置 shots 数量
-            )
-            #sampler = SamplerV2()
-            #sampler = Sampler()
+            # 尝试使用BackendSamplerV2，如果不可用则使用Sampler
+            try:
+                from qiskit.primitives import BackendSamplerV2
+                sampler = BackendSamplerV2(
+                    backend=backend,
+                    options={"default_shots": SHOTS}  # 使用命令行参数设置 shots 数量
+                )
+            except ImportError:
+                from qiskit.primitives import Sampler
+                sampler = Sampler(
+                    backend=backend,
+                    options={"default_shots": SHOTS}  # 使用命令行参数设置 shots 数量
+                )
             print("  - 使用本地Qiskit模拟器")
 
         print(f"Ansatz type: {type(ansatz)}")
@@ -203,7 +209,6 @@ def main():
         print(f"Sampler type: {type(sampler)}") 
 
         # 初始化VQE
-        from qiskit_optimization.algorithms import MinimumEigenOptimizer
         vqe = SamplingVQE(
             sampler=sampler,
             ansatz=ansatz,
@@ -324,7 +329,10 @@ def main():
             try:
                 print(f"\n正在生成第 {i+1} 个结果的蛋白质结构的3D图形...")
                 fig = result.get_figure(title=f"Protein Structure - Result {i+1} (Energy: {energy:.4f})", ticks=False, grid=True)
-                fig.get_axes()[0].view_init(10, 70)
+                
+                # 检查Figure对象是否有效
+                if hasattr(fig, 'get_axes') and len(fig.get_axes()) > 0:
+                    fig.get_axes()[0].view_init(10, 70)
                 
                 # 保存图形为文件（根据配置）
                 import matplotlib.pyplot as plt

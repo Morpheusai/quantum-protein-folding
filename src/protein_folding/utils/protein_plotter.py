@@ -10,10 +10,13 @@
 
 """An auxiliary class that plots aminoacids of a molecule
  in a ProteinFoldingResult."""
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 from qiskit.utils import optionals as _optionals
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 from protein_folding.utils.protein_shape_file_gen import (
     ProteinShapeFileGen,
@@ -149,7 +152,7 @@ class ProteinPlotter:
 
     def get_figure(
         self, title: str = "Protein Structure", ticks: bool = False, grid: bool = False
-    ) -> Figure:
+    ) -> 'Figure':
         """
         Plots the molecule in 3D.
 

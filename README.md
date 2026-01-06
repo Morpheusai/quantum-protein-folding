@@ -15,7 +15,7 @@ python run_protein_folding.py --backend="aws"
 
 # use ibm
 python run_protein_folding.py --backend="ibm"
-```
+
 
 #get top result (default=1)
 #results will be stored in the directory `result/{timestamp}_{energy value}_{environment}`.
@@ -32,3 +32,4 @@ python compare_results.py  --result_dirs submenu1 submenu2 ....
 
 #Return the top N best comparison results (default=3)
 python compare_results.py --top_n=5
+```

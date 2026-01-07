@@ -15,6 +15,7 @@ import json
 if os.name == 'nt':  # Windows系统
     os.environ['PYTHONUTF8'] = '1'
     os.environ['PYTHONIOENCODING'] = 'utf-8'
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 else:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 

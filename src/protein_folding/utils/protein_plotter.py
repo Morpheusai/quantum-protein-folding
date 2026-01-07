@@ -18,7 +18,7 @@ from qiskit.utils import optionals as _optionals
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
-from protein_folding.utils.protein_shape_file_gen import (
+from .protein_shape_file_gen import (
     ProteinShapeFileGen,
 )
 

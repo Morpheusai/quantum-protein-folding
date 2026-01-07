@@ -32,4 +32,11 @@ python compare_results.py  --result_dirs submenu1 submenu2 ....
 
 #Return the top N best comparison results (default=3)
 python compare_results.py --top_n=5
+
+# Generate image from JSON result file (output: result.png in the same directory)
+python structure2pic.py --input results/20260107_145139_local/result_xxx.json
+
+# Generate image from XYZ structure file (output: structure.png in the same directory)
+python structure2pic.py --input results/example.xyz
+
 ```

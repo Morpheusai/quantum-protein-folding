@@ -5,6 +5,5 @@ qiskit-optimization==0.6.1
 qiskit_braket_provider==0.8.1
 qiskit-ionq==1.0.2
 matplotlib==3.9.2
-numpy==1.26.4
-matplotlib==3.9.2
+numpy>=1.26.4
 scipy==1.13.1

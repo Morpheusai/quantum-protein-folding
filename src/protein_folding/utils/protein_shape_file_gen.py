@@ -12,7 +12,7 @@
 import os
 from typing import Union, List, Optional
 import numpy as np
-from protein_folding.peptide.peptide import Peptide
+from ..peptide.peptide import Peptide
 
 
 class ProteinShapeFileGen:

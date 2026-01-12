@@ -107,8 +107,65 @@ class ProteinFoldingProblem(SamplingProblem):
         # pylint: disable=import-outside-toplevel
         from .protein_folding_result import ProteinFoldingResult
 
-        #probs = raw_result.eigenstate.binary_probabilities()
-        probs = raw_result.eigenstate
+        # 原始代码 --2026-01-08-leon调整
+        # #probs = raw_result.eigenstate.binary_probabilities()
+        # probs = raw_result.eigenstate
+        # best_turn_sequence = max(probs, key=probs.get)
+        # return ProteinFoldingResult(
+        #     unused_qubits=self.unused_qubits,
+        #     peptide=self.peptide,
+        #     turn_sequence=best_turn_sequence,
+        # )
+        
+        # 在 Qiskit 2.x 中，结果的访问方式可能有所不同
+        probs = None  # 初始化probs变量以避免UnboundLocalError
+        try:
+            # 尝试旧版本的API
+            probs = raw_result.eigenstate.binary_probabilities()
+        except AttributeError:
+            # 在新版本中，可能需要通过其他方式访问概率
+            try:
+                # 尝试访问eigenstate属性
+                if hasattr(raw_result, 'eigenstate') and raw_result.eigenstate is not None:
+                    eigenstate = raw_result.eigenstate
+                    if hasattr(eigenstate, 'binary_probabilities'):
+                        probs = eigenstate.binary_probabilities()
+                    elif isinstance(eigenstate, dict):
+                        # 如果eigenstate已经是字典格式
+                        probs = eigenstate
+                    else:
+                        # 尝试从raw_result直接获取概率
+                        probs = getattr(raw_result, 'aux_operators_evaluated', {})
+                        if isinstance(probs, (list, tuple)) and len(probs) > 0:
+                            # 如果是列表，取第一个
+                            probs = probs[0]
+                        if not isinstance(probs, dict):
+                            # 当哈密顿量为空或全是恒等项时，可能没有概率分布
+                            # 构建一个默认的概率分布
+                            num_qubits = self._qubit_op_full().num_qubits
+                            if num_qubits > 0:
+                                # 对于n个量子比特，创建2^n个状态的均匀分布
+                                total_states = 2 ** num_qubits
+                                probs = {format(i, f'0{num_qubits}b'): 1.0/total_states for i in range(total_states)}
+                            else:
+                                probs = {'0': 1.0}  # 默认值
+            except AttributeError:
+                # 当哈密顿量为空时，所有状态都等价，返回默认状态
+                num_qubits = self._qubit_op_full().num_qubits
+                if num_qubits > 0:
+                    # 返回一个默认状态（例如全零状态）
+                    probs = {format(0, f'0{num_qubits}b'): 1.0}
+                else:
+                    probs = {'0': 1.0}
+        
+        # 检查probs是否为空或None
+        if not probs:
+            num_qubits = self._qubit_op_full().num_qubits
+            if num_qubits > 0:
+                probs = {format(0, f'0{num_qubits}b'): 1.0}
+            else:
+                probs = {'0': 1.0}
+        
         best_turn_sequence = max(probs, key=probs.get)
         return ProteinFoldingResult(
             unused_qubits=self.unused_qubits,

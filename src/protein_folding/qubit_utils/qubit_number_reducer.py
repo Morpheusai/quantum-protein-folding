@@ -52,8 +52,13 @@ def _compress_pauli_op(
     total_hamiltonian: Union[SparsePauliOp, Pauli, BaseOperator],
     unused_qubits: List[int],
 ) -> Union[Pauli, BaseOperator]:
-    table_z = total_hamiltonian.primitive.z
-    table_x = total_hamiltonian.primitive.x
+    # 原始代码 --2026-01-08-leon调整
+    # table_z = total_hamiltonian.primitive.z
+    # table_x = total_hamiltonian.primitive.x
+    
+    # Qiskit 2.x 兼容性修改
+    table_z = total_hamiltonian.z
+    table_x = total_hamiltonian.x
     new_table_z, new_table_x = _calc_reduced_pauli_tables(
         num_qubits, table_x, table_z, unused_qubits
     )
@@ -107,7 +112,12 @@ def _find_unused_qubits(total_hamiltonian: Union[SparsePauliOp, Pauli]) -> List[
     unused = []
     num_qubits = total_hamiltonian.num_qubits
     if isinstance(total_hamiltonian, Pauli):
-        table_z = total_hamiltonian.primitive.z
+        # 原始代码（已注释）
+        # table_z = total_hamiltonian.primitive.z
+        # _update_used_map(num_qubits, table_z, used_map)
+        
+        # Qiskit 2.x 兼容性修改
+        table_z = total_hamiltonian.z  # 在 Qiskit 2.x 中，直接访问 z 属性
         _update_used_map(num_qubits, table_z, used_map)
 
     elif isinstance(total_hamiltonian, SparsePauliOp):

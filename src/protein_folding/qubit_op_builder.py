@@ -107,7 +107,25 @@ class QubitOpBuilder:
 
         h_total = h_chiral + h_back + h_short + h_bbbb + h_bbsc + h_scbb + h_scsc
 
-        return h_total.simplify()
+        # 原始代码 --2026-01-08-leon调整
+        # return h_total.simplify()
+        
+        # 确保 h_total 是一个 SparsePauliOp 对象，然后进行简化
+        if isinstance(h_total, (int, float)) and h_total == 0:
+            # 如果所有项都为0，需要返回一个非零算子以保留量子比特
+            # 避免被 qubit_number_reducer 完全移除
+            from qiskit.quantum_info import SparsePauliOp
+            num_qubits = 4 * pow(len(self._peptide.get_main_chain) - 1, 2)
+            # 返回一个系数为0的恒等算子，但保持所有量子比特
+            if num_qubits > 0:
+                # 返回一个系数为0的恒等算子，但保持所有量子比特
+                identity_pauli = 'I' * num_qubits
+                return SparsePauliOp.from_list([(identity_pauli, 0.0)])
+            else:
+                # 如果量子比特数为0，返回一个简单的零
+                return SparsePauliOp.from_list([], num_qubits=0)
+        else:
+            return h_total.simplify()
 
     def _create_turn_operators(
         self, lower_bead: BaseBead, upper_bead: BaseBead

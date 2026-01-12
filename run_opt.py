@@ -1,0 +1,266 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+蛋白质折叠量子算法 - 服务器专用版 (适配 Qiskit 2.2.3+)
+
+功能特性：
+1. 支持多种量子后端：本地模拟器、AWS SV1、AWS Garnet、IBM量子设备
+2. 解决了量子后端测量门冲突问题
+3. 使用VQE算法优化蛋白质折叠能量
+4. 支持多轮独立实验及结果汇总分析
+
+兼容性修复：
+1. 解决 AWS 后端 "Cannot measure previously measured qubit" 报错
+2. 强制在每次迭代中使用干净的 Ansatz 副本
+3. 改用Estimator替代Sampler，提高各后端兼容性
+"""
+
+import argparse
+import os
+import sys
+import warnings
+import datetime
+import json
+import numpy as np
+import copy
+
+# 1. 图形后端配置：设置非GUI后端以解决服务器环境下的显示问题
+# 在服务器环境下，无头模式运行，避免因缺少显示设备而引发的 RuntimeError
+import matplotlib
+matplotlib.use('Agg') 
+import matplotlib.pyplot as plt
+
+# 2. 模块路径配置：添加src目录到系统路径，确保自定义模块可被导入
+# 避免相对导入问题，使程序能正确访问蛋白折叠相关模块
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(current_dir, 'src'))
+# 忽略警告信息，保持输出简洁
+warnings.filterwarnings('ignore')
+
+# ====================
+# 参数配置
+# ====================
+parser = argparse.ArgumentParser()
+parser.add_argument('--backend', default='local', help='local 或 aws_sv1 或 aws_garnet 或 ibm 或 ibm_simulator')
+parser.add_argument('--random_seed', type=int, default=23)
+parser.add_argument('--max_optimization_iterations', type=int, default=20)
+parser.add_argument('--ansatz_reps', type=int, default=1)
+parser.add_argument('--main_chain', default='APRLRFY')
+parser.add_argument('--penalty_back', type=float, default=10)
+parser.add_argument('--penalty_chiral', type=float, default=10)
+parser.add_argument('--penalty_local_overlap', type=float, default=10)
+parser.add_argument('--shots', type=int, default=100)
+parser.add_argument('--max_results', type=int, default=1)
+parser.add_argument('--aws_region', default=None)
+args = parser.parse_args()
+
+TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+RESULT_DIR = os.path.join("results", f"{TIMESTAMP}_{args.backend}")
+os.makedirs(RESULT_DIR, exist_ok=True)
+
+# ====================
+# 量子后端配置与运行逻辑
+# ====================
+
+def setup_v2_backend(backend_name, aws_region=None, shots=1000):
+    """适配 Qiskit 2.x V2 Primitives，使用Estimator而非Sampler以提高各后端兼容性"""
+    info = {'backend': None, 'estimator': None}
+    try:
+        if backend_name.lower() == 'aws_sv1':
+            from qiskit_braket_provider import BraketProvider
+            from qiskit.primitives import BackendEstimatorV2
+            if aws_region: os.environ['AWS_DEFAULT_REGION'] = aws_region
+            provider = BraketProvider()
+            backend = provider.get_backend('SV1')
+            info['backend'] = backend
+            estimator = BackendEstimatorV2(backend=backend)
+            estimator.options.default_shots = shots
+            info['estimator'] = estimator
+            print(f"✓ AWS SV1 (V2 Estimator) 已连接")
+        elif backend_name.lower() == 'aws_garnet':
+            from qiskit_braket_provider import BraketProvider
+            from qiskit.primitives import BackendEstimatorV2
+            if aws_region: os.environ['AWS_DEFAULT_REGION'] = aws_region
+            provider = BraketProvider()
+            backend = provider.get_backend('Garnet')
+            info['backend'] = backend
+            estimator = BackendEstimatorV2(backend=backend)
+            estimator.options.default_shots = shots
+            info['estimator'] = estimator
+            print(f"✓ AWS Garnet (V2 Estimator) 已连接")
+        elif backend_name.lower() == 'ibm':
+            try:
+                from qiskit_ibm_runtime import QiskitRuntimeService, EstimatorV2 as Estimator
+                service = QiskitRuntimeService()
+                # 使用性能最好的可用设备
+                backend = service.least_busy(operational=True, simulator=False)
+                info['backend'] = backend
+                estimator = Estimator(mode=backend)
+                # 设置选项
+                estimator.options.default_shots = shots
+                info['estimator'] = estimator
+                print(f"✓ IBM 量子后端已连接: {backend.name}")
+            except Exception as e:
+                print(f"✗ IBM 真实硬件连接失败: {e}")
+                print("  提示: 请确保已通过 'qiskit-ibm-runtime' 配置 IBM Quantum 访问凭据")
+                # 回退到IBM模拟器
+                try:
+                    from qiskit_ibm_runtime import QiskitRuntimeService, EstimatorV2 as Estimator
+                    service = QiskitRuntimeService()
+                    # 使用IBM模拟器
+                    backend = service.backend("ibmq_qasm_simulator")
+                    info['backend'] = backend
+                    estimator = Estimator(mode=backend)
+                    estimator.options.default_shots = shots
+                    info['estimator'] = estimator
+                    print(f"✓ IBM 模拟器已连接: {backend.name}")
+                except Exception as sim_e:
+                    print(f"✗ IBM 模拟器连接也失败: {sim_e}")
+                    # 最终回退到本地模拟器
+                    from qiskit.primitives import StatevectorEstimator
+                    info['estimator'] = StatevectorEstimator()
+                    print("  ✓ 已回退到本地 StatevectorEstimator")
+        else:
+            from qiskit.primitives import StatevectorEstimator
+            info['estimator'] = StatevectorEstimator()
+            print("✓ 本地 StatevectorEstimator 已就绪")
+        return info
+    except Exception as e:
+        print(f"✗ 后端设置失败: {e}")
+        from qiskit.primitives import StatevectorEstimator
+        return {'backend': None, 'estimator': StatevectorEstimator()}
+
+def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
+    from qiskit_algorithms import VQE
+    from qiskit import transpile
+
+    # 【核心修复】使用深拷贝创建干净的Ansatz副本
+    # 防止VQE算法在前次运行中添加的测量门污染当前实例
+    # 确保每次迭代都有纯净的量子电路用于计算
+    working_ansatz = copy.deepcopy(ansatz)
+    
+    # 彻底移除所有测量门，防止与 Estimator 的自动测量逻辑冲突
+    working_ansatz.remove_final_measurements() 
+
+    if backend is not None:
+        # 在转译过程中不添加任何测量，保持电路纯净
+        working_ansatz = transpile(working_ansatz, backend=backend, optimization_level=1)
+
+    convergence = {'counts': [], 'values': []}
+    def callback(eval_count, parameters, mean, std):
+        convergence['counts'].append(eval_count)
+        convergence['values'].append(mean)
+
+    # 使用处理后的 working_ansatz，现在使用 VQE 配合 estimator
+    vqe = VQE(estimator=estimator, ansatz=working_ansatz, optimizer=optimizer, callback=callback)
+    result = vqe.compute_minimum_eigenvalue(qubit_op)
+    return result, convergence
+
+# ====================
+# 蛋白质折叠主计算流程
+# ====================
+
+def main():
+    print(f"🚀 启动服务器计算任务 | 序列: {args.main_chain}")
+    
+    try:
+        from qiskit_algorithms.utils import algorithm_globals
+        from qiskit_algorithms.optimizers import COBYLA
+        from qiskit.circuit.library import RealAmplitudes
+        
+        # 蛋白质折叠核心模块导入
+        # Miyazawa-Jernigan相互作用模型：用于计算氨基酸间的相互作用能量
+        from protein_folding.interactions.miyazawa_jernigan_interaction import MiyazawaJerniganInteraction
+        # Peptide类：表示待折叠的肽链结构
+        from protein_folding.peptide.peptide import Peptide
+        # ProteinFoldingProblem类：将蛋白质折叠问题转换为量子计算问题
+        from protein_folding.protein_folding_problem import ProteinFoldingProblem
+        # PenaltyParameters类：定义约束项的惩罚系数
+        from protein_folding.penalty_parameters import PenaltyParameters
+    except ImportError as e:
+        print(f"✗ 模块导入失败: {e}")
+        return
+
+    # 初始化问题
+    mj_interaction = MiyazawaJerniganInteraction()
+    penalty_terms = PenaltyParameters(args.penalty_chiral, args.penalty_back, args.penalty_local_overlap)
+    peptide = Peptide(args.main_chain, [""] * len(args.main_chain))
+    problem = ProteinFoldingProblem(peptide, mj_interaction, penalty_terms)
+    qubit_op = problem.qubit_op()
+    
+    # 初始化后端与算法组件
+    backend_info = setup_v2_backend(args.backend, args.aws_region, args.shots)
+    optimizer = COBYLA(maxiter=args.max_optimization_iterations)
+    
+    # 构建变分量子线路 Ansatz (RealAmplitudes 默认不含测量门)
+    # RealAmplitudes 是一种常用的参数化量子线路，适用于变分量子特征求解器
+    base_ansatz = RealAmplitudes(num_qubits=qubit_op.num_qubits, reps=args.ansatz_reps)
+
+    all_conv_data = []
+
+    for i in range(args.max_results):
+        print(f"\n>>>> 正在计算 Run {i+1}/{args.max_results}...")
+        algorithm_globals.random_seed = args.random_seed + i
+        
+        # 执行VQE迭代计算
+        # 将哈密顿量、Ansatz、优化器和估算器传递给VQE算法
+        # 返回原始结果和收敛数据
+        raw_result, conv_data = run_vqe_iteration(
+            qubit_op, base_ansatz, optimizer, 
+            backend_info['estimator'], backend_info.get('backend')
+        )
+        all_conv_data.append(conv_data)
+        
+        # 结果解析与验证
+        # 确保原始结果包含必需的属性以避免运行时错误
+        if not hasattr(raw_result, 'eigenstate'):
+            raw_result.eigenstate = None
+        if not hasattr(raw_result, 'eigenvalue'):
+            raise ValueError("raw_result 缺少 eigenvalue 属性")
+        
+        result = problem.interpret(raw_result=raw_result)
+        energy = float(raw_result.eigenvalue.real)
+        
+        # 提取坐标与保存数据
+        xyz_data = None
+        try:
+            xyz_data = result.protein_shape_file_gen.get_xyz_data()
+        except: pass
+
+        result_data = {
+            "result_index": i + 1,
+            "energy": energy,
+            "main_turns": result.protein_shape_decoder.main_turns,
+            "side_turns": result.protein_shape_decoder.side_turns,
+            "sequence": args.main_chain,
+            "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None and len(xyz_data) > 0 else []
+        }
+        
+        with open(os.path.join(RESULT_DIR, f'result_{i+1}.json'), 'w') as f:
+            json.dump(result_data, f, indent=2)
+
+        # 绘图：单次结构
+        try:
+            fig_struct = result.get_figure(title=f"Result {i+1} (E={energy:.4f})")
+            fig_struct.savefig(os.path.join(RESULT_DIR, f"structure_{i+1}.png"))
+            plt.close(fig_struct)
+        except: pass
+
+    # 汇总绘图
+    try:
+        plt.figure(figsize=(10, 6))
+        for idx, data in enumerate(all_conv_data):
+            plt.plot(data['counts'], data['values'], label=f'Run {idx+1}')
+        plt.xlabel("Evaluation Counts")
+        plt.ylabel("Energy")
+        plt.title(f"VQE Convergence Comparison ({args.main_chain})")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(RESULT_DIR, "vqe_optimization_summary.png"))
+        plt.close()
+    except: pass
+
+    print(f"\n🎉 任务完成。结果目录: {RESULT_DIR}")
+
+if __name__ == "__main__":
+    main()

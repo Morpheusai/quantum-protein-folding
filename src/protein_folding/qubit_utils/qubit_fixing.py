@@ -42,8 +42,13 @@ def _fix_qubits(
     new_tables = []
     new_coeffs = []
     if isinstance(operator, Pauli):
-        table_z = np.copy(operator.primitive.z)
-        table_x = np.copy(operator.primitive.x)
+        # 原始代码 --2026-01-08-leon调整
+        # table_z = np.copy(operator.primitive.z)
+        # table_x = np.copy(operator.primitive.x)
+        
+        # Qiskit 2.x 兼容性修改
+        table_z = np.copy(operator.z)  # 在 Qiskit 2.x 中，直接访问 z 属性
+        table_x = np.copy(operator.x)  # 在 Qiskit 2.x 中，直接访问 x 属性
         _preset_binary_vals(table_z, has_side_chain_second_bead)
         return Pauli((table_z, table_x))
 

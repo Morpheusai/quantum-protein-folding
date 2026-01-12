@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-蛋白质折叠量子算法 - 服务器专用版 (适配 Qiskit 2.2.3+)
+蛋白质折叠量子算法 
 
 功能特性：
 1. 支持多种量子后端：本地模拟器、AWS SV1、AWS Garnet、IBM量子设备
@@ -24,6 +24,14 @@ import json
 import numpy as np
 import copy
 
+# 设置UTF-8环境以解决Windows编码问题
+if os.name == 'nt':  # Windows系统
+    os.environ['PYTHONUTF8'] = '1'
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+else:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
 # 1. 图形后端配置：设置非GUI后端以解决服务器环境下的显示问题
 # 在服务器环境下，无头模式运行，避免因缺少显示设备而引发的 RuntimeError
 import matplotlib
@@ -43,7 +51,7 @@ warnings.filterwarnings('ignore')
 parser = argparse.ArgumentParser()
 parser.add_argument('--backend', default='local', help='local 或 aws_sv1 或 aws_garnet 或 ibm 或 ibm_simulator')
 parser.add_argument('--random_seed', type=int, default=23)
-parser.add_argument('--max_optimization_iterations', type=int, default=20)
+parser.add_argument('--max_optimization_iterations', type=int, default=50)
 parser.add_argument('--ansatz_reps', type=int, default=1)
 parser.add_argument('--main_chain', default='APRLRFY')
 parser.add_argument('--penalty_back', type=float, default=10)
@@ -161,8 +169,23 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
 # ====================
 
 def main():
+    print("正在启动蛋白质折叠算法...")
     print(f"🚀 启动服务器计算任务 | 序列: {args.main_chain}")
     
+    # 显示参数配置
+    print(f"\n参数配置:")
+    print(f"  - 量子后端: {args.backend}")
+    print(f"  - 随机种子: {args.random_seed}")
+    print(f"  - 最大优化迭代次数: {args.max_optimization_iterations}")
+    print(f"  - Ansatz重复次数: {args.ansatz_reps}")
+    print(f"  - 主链序列: {args.main_chain}")
+    print(f"  - 几何约束惩罚: {args.penalty_back}")
+    print(f"  - 手性约束惩罚: {args.penalty_chiral}")
+    print(f"  - 局部重叠惩罚: {args.penalty_local_overlap}")
+    print(f"  - 量子采样次数: {args.shots}")
+    print(f"  - 最大结果数量: {args.max_results}")
+    print(f"  - 结果目录: {RESULT_DIR}")
+
     try:
         from qiskit_algorithms.utils import algorithm_globals
         from qiskit_algorithms.optimizers import COBYLA
@@ -177,30 +200,81 @@ def main():
         from protein_folding.protein_folding_problem import ProteinFoldingProblem
         # PenaltyParameters类：定义约束项的惩罚系数
         from protein_folding.penalty_parameters import PenaltyParameters
+        
+        print("✓ 成功导入蛋白质折叠模块")
+        
+        # 设置随机种子
+        algorithm_globals.random_seed = args.random_seed
+        print("✓ 随机种子设置完成")
     except ImportError as e:
         print(f"✗ 模块导入失败: {e}")
         return
 
-    # 初始化问题
+    # 定义蛋白质主链
+    print(f"\n正在定义蛋白质结构...")
+    main_chain = args.main_chain
+    print(f"✓ 主链序列: {main_chain}")
+    
+    # 定义侧链
+    side_chains = [""] * len(main_chain)  # 本例中不考虑侧链
+    print(f"✓ 侧链序列: {side_chains}")
+    
+    # 创建相互作用模型
+    print(f"\n正在创建相互作用模型...")
     mj_interaction = MiyazawaJerniganInteraction()
-    penalty_terms = PenaltyParameters(args.penalty_chiral, args.penalty_back, args.penalty_local_overlap)
-    peptide = Peptide(args.main_chain, [""] * len(args.main_chain))
+    print("✓ Miyazawa-Jernigan相互作用模型创建完成")
+    
+    # 定义惩罚参数
+    print(f"\n正在设置物理约束参数...")
+    penalty_back = args.penalty_back
+    penalty_chiral = args.penalty_chiral
+    penalty_1 = args.penalty_local_overlap
+    penalty_terms = PenaltyParameters(penalty_chiral, penalty_back, penalty_1)
+    print(f"✓ 惩罚参数设置完成: chiral={penalty_chiral}, back={penalty_back}, local_overlap={penalty_1}")
+    
+    # 创建肽对象
+    print(f"\n正在创建肽对象...")
+    peptide = Peptide(main_chain, side_chains)
+    print("✓ 肽对象创建完成")
+    
+    # 创建蛋白质折叠问题
+    print(f"\n正在构建蛋白质折叠问题...")
     problem = ProteinFoldingProblem(peptide, mj_interaction, penalty_terms)
     qubit_op = problem.qubit_op()
+    print(f"✓ 量子比特算子构建完成: {qubit_op}")
+    print(f"  - 量子比特数量: {qubit_op.num_qubits}")
     
     # 初始化后端与算法组件
+    print(f"\n正在使用VQE算法求解...")
     backend_info = setup_v2_backend(args.backend, args.aws_region, args.shots)
     optimizer = COBYLA(maxiter=args.max_optimization_iterations)
+    print("✓ 优化器设置完成")
+    print(f"  - 使用优化器: {type(optimizer).__name__}")
+    print(f"  - 最大迭代次数: {args.max_optimization_iterations}")
     
     # 构建变分量子线路 Ansatz (RealAmplitudes 默认不含测量门)
     # RealAmplitudes 是一种常用的参数化量子线路，适用于变分量子特征求解器
     base_ansatz = RealAmplitudes(num_qubits=qubit_op.num_qubits, reps=args.ansatz_reps)
+    print("✓ 变分波函数设置完成")
+    print(f"  - 量子比特数量: {base_ansatz.num_qubits}")
+    print(f"  - 参数数量: {base_ansatz.num_parameters}")
+    print(f"  - 电路重复次数: {args.ansatz_reps}")
 
     all_conv_data = []
 
+    print(f"\n正在计算最多 {args.max_results} 个最优结果...")
+    print(f"  - 量子采样次数: {args.shots}")
+    
+    # 存储多个结果
+    all_results = []
+    all_energies = []
+    
     for i in range(args.max_results):
-        print(f"\n>>>> 正在计算 Run {i+1}/{args.max_results}...")
+        print(f"  - 正在计算第 {i+1}/{args.max_results} 个结果...")
         algorithm_globals.random_seed = args.random_seed + i
+        
+        # 显示当前迭代的随机种子
+        print(f"    - 当前随机种子: {algorithm_globals.random_seed}")
         
         # 执行VQE迭代计算
         # 将哈密顿量、Ansatz、优化器和估算器传递给VQE算法
@@ -221,33 +295,68 @@ def main():
         result = problem.interpret(raw_result=raw_result)
         energy = float(raw_result.eigenvalue.real)
         
+        # 存储结果和能量
+        all_results.append(result)
+        all_energies.append(energy)
+        
+        print(f"    - 第 {i+1} 个结果能量: {energy:.6f}")
+        
+        # 解释结果
+        print(f"正在处理第 {i+1} 个结果 (能量: {energy:.6f})...")
+        print(f"✓ 第 {i+1} 个蛋白质形状解码完成")
+        print(f"  - 折叠蛋白的主链转向序列: {result.protein_shape_decoder.main_turns}")
+        print(f"  - 侧链转向序列: {result.protein_shape_decoder.side_turns}")
+        print(f"  - 代表蛋白质形状的比特串: {result.turn_sequence}")
+        
         # 提取坐标与保存数据
+        print(f"\n正在获取第 {i+1} 个结果的蛋白质的笛卡尔坐标...")
         xyz_data = None
         try:
             xyz_data = result.protein_shape_file_gen.get_xyz_data()
-        except: pass
+            print(f"✓ 第 {i+1} 个结果的坐标数据获取完成")
+            print("前几行坐标数据:")
+            for j, row in enumerate(xyz_data[:5]):  # 只显示前5行
+                line = ' '.join(map(str, row))
+                if line.strip():
+                    print(f"  {line}")
+        except Exception as e:
+            print(f"⚠ 获取坐标数据时出错: {e}")
 
         result_data = {
             "result_index": i + 1,
             "energy": energy,
             "main_turns": result.protein_shape_decoder.main_turns,
             "side_turns": result.protein_shape_decoder.side_turns,
+            "turn_sequence": result.turn_sequence,
+            "main_chain_sequence": args.main_chain,
             "sequence": args.main_chain,
             "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None and len(xyz_data) > 0 else []
         }
         
-        with open(os.path.join(RESULT_DIR, f'result_{i+1}.json'), 'w') as f:
+        json_path = os.path.join(RESULT_DIR, f'result_{i+1}_energy_{energy:.4f}_parameters.json')
+        with open(json_path, 'w') as f:
             json.dump(result_data, f, indent=2)
+        print(f"✓ 第 {i+1} 个结果的核心参数已保存为 {json_path}")
 
         # 绘图：单次结构
         try:
+            print(f"\n正在生成第 {i+1} 个结果的蛋白质结构的3D图形...")
             fig_struct = result.get_figure(title=f"Result {i+1} (E={energy:.4f})")
-            fig_struct.savefig(os.path.join(RESULT_DIR, f"structure_{i+1}.png"))
+            png_path = os.path.join(RESULT_DIR, f"structure_{i+1}_energy_{energy:.4f}.png")
+            fig_struct.savefig(png_path)
             plt.close(fig_struct)
-        except: pass
+            print(f"✓ 第 {i+1} 个结果的3D图形已保存为 {png_path}")
+        except Exception as e:
+            print(f"⚠ 生成第 {i+1} 个结果的3D图形时出错: {e}")
 
+    # 显示量子计算统计信息
+    print(f"\n  - 量子比特数量: {base_ansatz.num_qubits}")
+    print(f"  - 电路参数数量: {base_ansatz.num_parameters}")
+    print(f"  - 总函数评估次数: {sum(len(data['counts']) for data in all_conv_data) if all_conv_data else 0}")
+    
     # 汇总绘图
     try:
+        print(f"\n正在生成VQE优化过程的折线图...")
         plt.figure(figsize=(10, 6))
         for idx, data in enumerate(all_conv_data):
             plt.plot(data['counts'], data['values'], label=f'Run {idx+1}')
@@ -258,9 +367,22 @@ def main():
         plt.grid(True)
         plt.savefig(os.path.join(RESULT_DIR, "vqe_optimization_summary.png"))
         plt.close()
-    except: pass
+        print(f"✓ VQE优化过程图已保存为 {os.path.join(RESULT_DIR, 'vqe_optimization_summary.png')}")
+    except Exception as e:
+        print(f"⚠ 生成VQE优化过程图时出错: {e}")
 
-    print(f"\n🎉 任务完成。结果目录: {RESULT_DIR}")
+    print(f"\n✓ 蛋白质折叠计算完成！")
+    print(f"🎉 任务完成。结果目录: {RESULT_DIR}")
+    
+    return True
 
 if __name__ == "__main__":
-    main()
+    # 设置环境变量以解决编码问题
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    
+    success = main()
+    if success:
+        print("\n🎉 蛋白质折叠模拟运行成功！")
+    else:
+        print("\n❌ 蛋白质折叠模拟运行失败。")
+        sys.exit(1)

@@ -164,6 +164,38 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
     result = vqe.compute_minimum_eigenvalue(qubit_op)
     return result, convergence
 
+def save_as_pdb(xyz_data, file_path):
+    """确保生成的 PDB 格式严丝合缝，特别适配 VMD 等专业分子可视化软件"""
+    aa_1to3 = {
+        'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU', 'F': 'PHE',
+        'G': 'GLY', 'H': 'HIS', 'I': 'ILE', 'K': 'LYS', 'L': 'LEU',
+        'M': 'MET', 'N': 'ASN', 'P': 'PRO', 'Q': 'GLN', 'R': 'ARG',
+        'S': 'SER', 'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
+    }
+    
+    pdb_lines = []
+    num_atoms = len(xyz_data)
+    if num_atoms == 0: return
+
+    # 1. ATOM 记录
+    for i, row in enumerate(xyz_data):
+        aa_1, x, y, z = row[0], float(row[1]), float(row[2]), float(row[3])
+        aa_3 = aa_1to3.get(aa_1, 'UNK')
+        line = f"ATOM  {i+1:5d}  CA  {aa_3:3s} A{i+1:4d}    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           C"
+        pdb_lines.append(line)
+
+    # 2. CONECT 记录 (VMD 识别非标准键长的关键)
+    for i in range(1, num_atoms):
+        pdb_lines.append(f"CONECT{i:5d}{i+1:5d}")
+        
+    # 3. TER 与 END
+    last_res = aa_1to3.get(xyz_data[-1][0], 'UNK') if num_atoms > 0 else "UNK"
+    pdb_lines.append(f"TER   {num_atoms+1:5d}      {last_res:3s} A{num_atoms:4d}")
+    pdb_lines.append("END")
+    
+    with open(file_path, 'w') as f:
+        f.write("\n".join(pdb_lines) + "\n")
+
 # ====================
 # 蛋白质折叠主计算流程
 # ====================
@@ -286,9 +318,47 @@ def main():
         all_conv_data.append(conv_data)
         
         # 结果解析与验证
-        # 确保原始结果包含必需的属性以避免运行时错误
-        if not hasattr(raw_result, 'eigenstate'):
-            raw_result.eigenstate = None
+        # 【核心修复】VQE 使用 Estimator 时不返回 eigenstate (概率分布)
+        # 必须根据最优参数还原比特串分布，否则 interpret 无法识别真实的蛋白质形状
+        print(f"    - 正在分析最优参数以提取蛋白质结构...")
+        try:
+            # 1. 产生最优电路的一个干净副本 (此时不含测量门)
+            best_circuit = base_ansatz.assign_parameters(raw_result.optimal_point)
+            
+            # 2. 策略：如果是模拟器 (local 或 aws_sv1)，本地计算 eigenstate 既快又准
+            # 这样可以 100% 避免 AWS 后端可能出现的“重复测量”或“网络延迟”问题
+            is_simulator = args.backend.lower() in ['local', 'aws_sv1', 'ibm_simulator']
+            
+            if is_simulator or backend_info.get('backend') is None:
+                from qiskit.quantum_info import Statevector
+                # 使用 Statevector 直接还原概率分布，结果与 SV1 跑出来的理论概率完全一致
+                raw_result.eigenstate = Statevector.from_instruction(best_circuit).probabilities_dict()
+                print(f"    - 通过模拟还原概率分布成功")
+            else:
+                # 3. 如果是真实量子硬件 (如 Garnet)，则必须进行实际采样
+                from qiskit.primitives import BackendSamplerV2
+                from qiskit import transpile
+                
+                # 重点：先转译不含测量的干净电路，再添加测量，防止测量冲突
+                meas_circuit = transpile(best_circuit, backend=backend_info['backend'], optimization_level=1)
+                meas_circuit.measure_all()
+                
+                sampler = BackendSamplerV2(backend=backend_info['backend'])
+                job = sampler.run([meas_circuit], shots=args.shots)
+                sampler_res = job.result()[0]
+                
+                # 提取计数 (适配 BackendSamplerV2 的 DataBin 格式)
+                reg_name = list(sampler_res.data.keys())[0]
+                counts = getattr(sampler_res.data, reg_name).get_counts()
+                total_shots = sum(counts.values())
+                raw_result.eigenstate = {k: v/total_shots for k, v in counts.items()}
+                print(f"    - 通过硬件采样还原概率分布成功")
+                
+        except Exception as e:
+            print(f"⚠ 提取蛋白质结构时出错: {e}")
+            if not hasattr(raw_result, 'eigenstate'):
+                raw_result.eigenstate = None
+            
         if not hasattr(raw_result, 'eigenvalue'):
             raise ValueError("raw_result 缺少 eigenvalue 属性")
         
@@ -337,6 +407,12 @@ def main():
         with open(json_path, 'w') as f:
             json.dump(result_data, f, indent=2)
         print(f"✓ 第 {i+1} 个结果的核心参数已保存为 {json_path}")
+
+        # 保存 PDB 文件
+        if xyz_data is not None:
+            pdb_path = os.path.join(RESULT_DIR, f'structure_{i+1}_energy_{energy:.4f}.pdb')
+            save_as_pdb(xyz_data, pdb_path)
+            print(f"✓ 第 {i+1} 个结果的 PDB 文件已保存为 {pdb_path}")
 
         # 绘图：单次结构
         try:

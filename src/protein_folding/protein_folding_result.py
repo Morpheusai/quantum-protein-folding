@@ -168,6 +168,34 @@ class ProteinFoldingResult:
             name=name, path=path, comment=comment, replace=replace
         )
 
+    def save_detailed_pdb_file(
+        self,
+        name: Optional[str] = None,
+        path: str = "",
+        title: str = "Detailed Protein Structure",
+        replace: bool = False,
+    ) -> None:
+        """
+        Generates a detailed .pdb file with complete atomic coordinates.
+
+        Args:
+            name: Name of the file to be generated. If the name is ``None`` the
+                name of the file will be based on the letters of the aminoacids on the main_chain.
+                If a file of the same name already exists then the action taken is dependent
+                on the `replace` arg.
+            path: Path where the file will be generated. If left empty the file will
+                be saved in the working directory.
+            title: Title to be included in the PDB file.
+            replace: If ``True``, the file will be overwritten if it already exists.
+        Raises:
+            FileExistsError: If the file already exists and replace is ``False``.
+        """
+        if name is None:
+            name = str(self._peptide.get_main_chain.main_chain_residue_sequence)
+        self.protein_shape_file_gen.save_detailed_pdb_file(
+            name=name, path=path, title=title, replace=replace
+        )
+
     @_optionals.HAS_MATPLOTLIB.require_in_call
     def get_figure(
         self, title: str = "Protein Structure", ticks: bool = False, grid: bool = False

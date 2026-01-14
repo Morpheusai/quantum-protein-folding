@@ -13,6 +13,7 @@ import os
 from typing import Union, List, Optional
 import numpy as np
 from ..peptide.peptide import Peptide
+from .detailed_pdb_generator import DetailedPDBGenerator
 
 
 class ProteinShapeFileGen:
@@ -178,3 +179,33 @@ class ProteinShapeFileGen:
             data = main_data
 
         return data
+
+    def save_detailed_pdb_file(
+        self, name: str, path: str = "", title: str = "Detailed Protein Structure", replace: bool = False
+    ) -> None:
+        """
+        Saves the data as a detailed .pdb file with complete atomic coordinates.
+
+        Args:
+            name: The file will be called "name".pdb. Can overwrite files.
+            path: Path under which the file will be saved. If no path is specified the file will
+                be saved in the current working directory.
+            title: Title to be included in the PDB file.
+            replace: If ``True``, the file will be overwritten if it already exists.
+        Raises:
+            FileExistsError: If the file already exists and ``replace`` is False.
+        """
+        file_path = os.path.join(path, name + ".pdb")
+        if not replace and os.path.exists(file_path):
+            raise FileExistsError(f"File {file_path} already exists.")
+        
+        # Create a detailed PDB generator
+        generator = DetailedPDBGenerator(
+            main_chain_positions=self.main_positions,
+            side_chain_positions=self.side_positions,
+            main_chain_sequence="".join(self.main_chain_aminoacid_list),
+            side_chain_sequences=self.side_chain_aminoacid_list
+        )
+        
+        # Save the detailed PDB file
+        generator.save_pdb_file(file_path, title=title)

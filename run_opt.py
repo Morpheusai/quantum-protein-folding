@@ -410,9 +410,11 @@ def main():
 
         # 保存 PDB 文件
         if xyz_data is not None:
-            pdb_path = os.path.join(RESULT_DIR, f'structure_{i+1}_energy_{energy:.4f}.pdb')
-            save_as_pdb(xyz_data, pdb_path)
-            print(f"✓ 第 {i+1} 个结果的 PDB 文件已保存为 {pdb_path}")
+            # 保存新版详细PDB文件（包含H、N等完整原子坐标）
+            from src.protein_folding.utils.detailed_pdb_generator import convert_xyz_to_detailed_pdb
+            detailed_pdb_path = os.path.join(RESULT_DIR, f'structure_{i+1}_energy_{energy:.4f}.pdb')
+            convert_xyz_to_detailed_pdb(xyz_data, detailed_pdb_path, f"Detailed Structure {i+1} (E={energy:.4f})")
+            print(f"✓ 第 {i+1} 个结果的详细PDB文件已保存为 {detailed_pdb_path}")
 
         # 绘图：单次结构
         try:

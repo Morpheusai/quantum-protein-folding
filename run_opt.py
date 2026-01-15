@@ -24,13 +24,13 @@ import json
 import numpy as np
 import copy
 
-# 设置UTF-8环境以解决Windows编码问题
+# 设置UTF-8环境以解决Windows编码问题并配置模块路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
 if os.name == 'nt':  # Windows系统
     os.environ['PYTHONUTF8'] = '1'
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-else:
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+sys.path.insert(0, os.path.join(current_dir, 'src'))
 
 # 1. 图形后端配置：设置非GUI后端以解决服务器环境下的显示问题
 # 在服务器环境下，无头模式运行，避免因缺少显示设备而引发的 RuntimeError
@@ -38,10 +38,6 @@ import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 
-# 2. 模块路径配置：添加src目录到系统路径，确保自定义模块可被导入
-# 避免相对导入问题，使程序能正确访问蛋白折叠相关模块
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(current_dir, 'src'))
 # 忽略警告信息，保持输出简洁
 warnings.filterwarnings('ignore')
 
@@ -49,7 +45,7 @@ warnings.filterwarnings('ignore')
 # 参数配置
 # ====================
 parser = argparse.ArgumentParser()
-parser.add_argument('--backend', default='local', help='local 或 aws_sv1 或 aws_garnet 或 ibm 或 ibm_simulator')
+parser.add_argument('--backend', default='local', help='local, aws_sv1, aws_garnet, aws_ionq, aws_forte, ibm, ibm_simulator')
 parser.add_argument('--random_seed', type=int, default=23)
 parser.add_argument('--max_optimization_iterations', type=int, default=50)
 parser.add_argument('--ansatz_reps', type=int, default=1)
@@ -82,6 +78,8 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
             backend = provider.get_backend('SV1')
             info['backend'] = backend
             estimator = BackendEstimatorV2(backend=backend)
+            # 设置 default_precision 以确保硬件执行正确的采样次数
+            estimator.options.default_precision = 1 / (shots**0.5)
             estimator.options.default_shots = shots
             info['estimator'] = estimator
             print(f"✓ AWS SV1 (V2 Estimator) 已连接")
@@ -93,9 +91,37 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
             backend = provider.get_backend('Garnet')
             info['backend'] = backend
             estimator = BackendEstimatorV2(backend=backend)
+            # V2 Primitives 优先使用精度(precision)控制采样
+            estimator.options.default_precision = 1 / (shots**0.5)
             estimator.options.default_shots = shots
             info['estimator'] = estimator
             print(f"✓ AWS Garnet (V2 Estimator) 已连接")
+        elif backend_name.lower() == 'aws_ionq':
+            from qiskit_braket_provider import BraketProvider
+            from qiskit.primitives import BackendEstimatorV2
+            if aws_region: os.environ['AWS_DEFAULT_REGION'] = aws_region
+            provider = BraketProvider()
+            # 获取 IonQ Harmony (11 qubits)
+            backend = provider.get_backend('IonQ Device')
+            info['backend'] = backend
+            estimator = BackendEstimatorV2(backend=backend)
+            estimator.options.default_precision = 1 / (shots**0.5)
+            estimator.options.default_shots = shots
+            info['estimator'] = estimator
+            print(f"✓ AWS IonQ Harmony (V2 Estimator) 已连接")
+        elif backend_name.lower() == 'aws_forte':
+            from qiskit_braket_provider import BraketProvider
+            from qiskit.primitives import BackendEstimatorV2
+            if aws_region: os.environ['AWS_DEFAULT_REGION'] = aws_region
+            provider = BraketProvider()
+            # 获取 IonQ Forte-1 (30+ qubits)
+            backend = provider.get_backend('Forte-1')
+            info['backend'] = backend
+            estimator = BackendEstimatorV2(backend=backend)
+            estimator.options.default_precision = 1 / (shots**0.5)
+            estimator.options.default_shots = shots
+            info['estimator'] = estimator
+            print(f"✓ AWS IonQ Forte-1 (V2 Estimator) 已连接")
         elif backend_name.lower() == 'ibm':
             try:
                 from qiskit_ibm_runtime import QiskitRuntimeService, EstimatorV2 as Estimator
@@ -105,6 +131,8 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
                 info['backend'] = backend
                 estimator = Estimator(mode=backend)
                 # 设置选项
+                # 设置选项，确保精度与采样数同步更新
+                estimator.options.default_precision = 1 / (shots**0.5)
                 estimator.options.default_shots = shots
                 info['estimator'] = estimator
                 print(f"✓ IBM 量子后端已连接: {backend.name}")
@@ -119,6 +147,7 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
                     backend = service.backend("ibmq_qasm_simulator")
                     info['backend'] = backend
                     estimator = Estimator(mode=backend)
+                    estimator.options.default_precision = 1 / (shots**0.5)
                     estimator.options.default_shots = shots
                     info['estimator'] = estimator
                     print(f"✓ IBM 模拟器已连接: {backend.name}")
@@ -164,37 +193,7 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
     result = vqe.compute_minimum_eigenvalue(qubit_op)
     return result, convergence
 
-def save_as_pdb(xyz_data, file_path):
-    """确保生成的 PDB 格式严丝合缝，特别适配 VMD 等专业分子可视化软件"""
-    aa_1to3 = {
-        'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU', 'F': 'PHE',
-        'G': 'GLY', 'H': 'HIS', 'I': 'ILE', 'K': 'LYS', 'L': 'LEU',
-        'M': 'MET', 'N': 'ASN', 'P': 'PRO', 'Q': 'GLN', 'R': 'ARG',
-        'S': 'SER', 'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
-    }
-    
-    pdb_lines = []
-    num_atoms = len(xyz_data)
-    if num_atoms == 0: return
 
-    # 1. ATOM 记录
-    for i, row in enumerate(xyz_data):
-        aa_1, x, y, z = row[0], float(row[1]), float(row[2]), float(row[3])
-        aa_3 = aa_1to3.get(aa_1, 'UNK')
-        line = f"ATOM  {i+1:5d}  CA  {aa_3:3s} A{i+1:4d}    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           C"
-        pdb_lines.append(line)
-
-    # 2. CONECT 记录 (VMD 识别非标准键长的关键)
-    for i in range(1, num_atoms):
-        pdb_lines.append(f"CONECT{i:5d}{i+1:5d}")
-        
-    # 3. TER 与 END
-    last_res = aa_1to3.get(xyz_data[-1][0], 'UNK') if num_atoms > 0 else "UNK"
-    pdb_lines.append(f"TER   {num_atoms+1:5d}      {last_res:3s} A{num_atoms:4d}")
-    pdb_lines.append("END")
-    
-    with open(file_path, 'w') as f:
-        f.write("\n".join(pdb_lines) + "\n")
 
 # ====================
 # 蛋白质折叠主计算流程
@@ -297,10 +296,6 @@ def main():
     print(f"\n正在计算最多 {args.max_results} 个最优结果...")
     print(f"  - 量子采样次数: {args.shots}")
     
-    # 存储多个结果
-    all_results = []
-    all_energies = []
-    
     for i in range(args.max_results):
         print(f"  - 正在计算第 {i+1}/{args.max_results} 个结果...")
         algorithm_globals.random_seed = args.random_seed + i
@@ -364,11 +359,6 @@ def main():
         
         result = problem.interpret(raw_result=raw_result)
         energy = float(raw_result.eigenvalue.real)
-        
-        # 存储结果和能量
-        all_results.append(result)
-        all_energies.append(energy)
-        
         print(f"    - 第 {i+1} 个结果能量: {energy:.6f}")
         
         # 解释结果
@@ -455,9 +445,6 @@ def main():
     return True
 
 if __name__ == "__main__":
-    # 设置环境变量以解决编码问题
-    os.environ['PYTHONIOENCODING'] = 'utf-8'
-    
     success = main()
     if success:
         print("\n🎉 蛋白质折叠模拟运行成功！")

@@ -47,7 +47,7 @@ warnings.filterwarnings('ignore')
 parser = argparse.ArgumentParser()
 parser.add_argument('--backend', default='local', help='local, aws_sv1, aws_garnet, aws_ionq, aws_forte, ibm, ibm_simulator')
 parser.add_argument('--random_seed', type=int, default=23)
-parser.add_argument('--max_optimization_iterations', type=int, default=50)
+parser.add_argument('--max_optimization_iterations', type=int, default=10)
 parser.add_argument('--ansatz_reps', type=int, default=1)
 parser.add_argument('--main_chain', default='APRLRFY')
 parser.add_argument('--penalty_back', type=float, default=10)
@@ -115,7 +115,7 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
             if aws_region: os.environ['AWS_DEFAULT_REGION'] = aws_region
             provider = BraketProvider()
             # 获取 IonQ Forte-1 (30+ qubits)
-            backend = provider.get_backend('Forte-1')
+            backend = provider.get_backend('Forte 1')
             info['backend'] = backend
             estimator = BackendEstimatorV2(backend=backend)
             estimator.options.default_precision = 1 / (shots**0.5)

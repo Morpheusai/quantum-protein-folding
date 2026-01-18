@@ -181,7 +181,11 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
 
     if backend is not None:
         # 在转译过程中不添加任何测量，保持电路纯净
-        working_ansatz = transpile(working_ansatz, backend=backend, optimization_level=1)
+        # 添加initial_layout参数以更好地处理AWS硬件限制
+        working_ansatz = transpile(working_ansatz, backend=backend,
+                                  initial_layout=list(range(working_ansatz.num_qubits)) if args.backend not in ['local', 'aws_sv1', 'ibm_simulator'] else None,
+                                  optimization_level=3)
+        print(f"   VQE电路转译: 逻辑比特数={working_ansatz.num_qubits}, 物理比特数={working_ansatz.width()}")
 
     convergence = {'counts': [], 'values': []}
     def callback(eval_count, parameters, mean, std):
@@ -335,7 +339,11 @@ def main():
                 from qiskit import transpile
                 
                 # 重点：先转译不含测量的干净电路，再添加测量，防止测量冲突
-                meas_circuit = transpile(best_circuit, backend=backend_info['backend'], optimization_level=1)
+                # 使用更好的转译策略处理硬件限制
+                meas_circuit = transpile(best_circuit, backend=backend_info['backend'],
+                                       initial_layout=list(range(best_circuit.num_qubits)) if args.backend not in ['local', 'aws_sv1', 'ibm_simulator'] else None,
+                                       optimization_level=3)
+                print(f"   结果电路转译: 逻辑比特数={meas_circuit.num_qubits}, 物理比特数={meas_circuit.width()}")
                 meas_circuit.measure_all()
                 
                 sampler = BackendSamplerV2(backend=backend_info['backend'])

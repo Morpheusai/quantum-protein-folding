@@ -260,10 +260,13 @@ def main():
         transpiled_circuit = clean_circuit
     else:
         # 对于AWS后端，需要转译电路以适配目标设备的拓扑和门集
-        transpiled_circuit = transpile(clean_circuit, backend=backend, optimization_level=1)
-
+        transpiled_circuit = transpile(clean_circuit,backend=backend,
+                                        initial_layout=list(range(num_qubits)) if args.backend != 'local' else None,
+                                        optimization_level=3
+                                      )
+    print(f"   逻辑比特数 (算法需求): {clean_circuit.num_qubits}")
+    print(f"   转译后物理比特数 (硬件占用): {transpiled_circuit.num_qubits}")
     all_conv_data = []
-
     for i in range(args.max_results):
         print(f"\n--- 实验 {i+1}/{args.max_results} ---")
         curr_seed = args.random_seed + i

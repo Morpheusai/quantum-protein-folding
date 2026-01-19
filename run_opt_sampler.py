@@ -23,6 +23,10 @@ from qiskit.circuit.library import RealAmplitudes
 from qiskit_braket_provider import BraketProvider
 from scipy.optimize import minimize
 import traceback
+from job_metadata_logger import JobMetadataLogger
+
+# 创建元数据记录器实例
+metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
 
 # 环境配置
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -207,7 +211,7 @@ def calculate_cvar_energy(counts, qubit_op, alpha):
 # ====================
 # 主计算流程
 # ====================
-
+@metadata_logger
 def main():
     print(f"🚀 启动蛋白质折叠计算任务 (采样器模式) | 序列: {args.main_chain}")
     

@@ -23,6 +23,11 @@ import datetime
 import json
 import numpy as np
 import copy
+from job_metadata_logger import JobMetadataLogger
+
+# 创建元数据记录器实例
+metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
+
 
 # 设置UTF-8环境以解决Windows编码问题并配置模块路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -61,6 +66,8 @@ args = parser.parse_args()
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 RESULT_DIR = os.path.join("results", f"{TIMESTAMP}_{args.backend}")
 os.makedirs(RESULT_DIR, exist_ok=True)
+
+
 
 # ====================
 # 量子后端配置与运行逻辑
@@ -202,7 +209,7 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
 # ====================
 # 蛋白质折叠主计算流程
 # ====================
-
+@metadata_logger
 def main():
     print("正在启动蛋白质折叠算法...")
     print(f"🚀 启动服务器计算任务 | 序列: {args.main_chain}")
@@ -452,7 +459,9 @@ def main():
     
     return True
 
+
 if __name__ == "__main__":
+
     success = main()
     if success:
         print("\n🎉 蛋白质折叠模拟运行成功！")

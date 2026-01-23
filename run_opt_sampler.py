@@ -44,7 +44,7 @@ warnings.filterwarnings('ignore')
 # 参数配置
 # ====================
 parser = argparse.ArgumentParser(description='蛋白质折叠量子算法 - 采样器模式')
-parser.add_argument('--backend', default='local', help='量子后端选择: local (本地模拟器), aws_sv1 (AWS模拟器), aws_garnet (AWS量子芯片), aws_ionq (AWS IonQ量子设备), aws_forte (AWS IonQ Forte量子设备), ibm (IBM量子设备), ibm_simulator (IBM模拟器)')
+parser.add_argument('--backend', default='local', help='量子后端选择: local (本地模拟器，优先使用AerSimulator), local_aer (强制使用AerSimulator), aws_sv1 (AWS模拟器), aws_garnet (AWS量子芯片), aws_ionq (AWS IonQ量子设备), aws_forte (AWS IonQ Forte量子设备), ibm (IBM量子设备), ibm_simulator (IBM模拟器)')
 parser.add_argument('--random_seed', type=int, default=23, help='随机种子，用于确保结果可重现')
 parser.add_argument('--max_optimization_iterations', type=int, default=10, help='最大优化迭代次数')
 parser.add_argument('--ansatz_reps', type=int, default=1, help='变分量子线路的重复层数')
@@ -132,10 +132,28 @@ def setup_sampler_backend(backend_name, aws_region=None, shots=1000):
             backend = service.backend("ibmq_qasm_simulator")
             print(f"✓ IBM 模拟器已连接: {backend.name}")
             return backend
+        elif backend_name.lower() == 'local_aer':
+            # 使用AerSimulator作为本地后端
+            try:
+                from qiskit_aer import AerSimulator
+                backend = AerSimulator()
+                print("✓ 本地 AerSimulator 已就绪")
+            except ImportError:
+                print("⚠ AerSimulator 不可用，回退到 BasicSimulator")
+                from qiskit.providers.basic_provider import BasicSimulator
+                backend = BasicSimulator()
+                print("✓ 本地 BasicSimulator 已就绪")
+            return backend
         else:
-            from qiskit.providers.basic_provider import BasicSimulator
-            backend = BasicSimulator()
-            print("✓ 本地 BasicSimulator 已就绪")
+            # 默认本地后端，优先使用AerSimulator，如果不可用则回退到BasicSimulator
+            try:
+                from qiskit_aer import AerSimulator
+                backend = AerSimulator()
+                print("✓ 本地 AerSimulator 已就绪")
+            except ImportError:
+                from qiskit.providers.basic_provider import BasicSimulator
+                backend = BasicSimulator()
+                print("✓ 本地 BasicSimulator 已就绪")
             return backend
     except Exception as e:
         print(f"✗ 后端设置失败: {e}")
@@ -277,6 +295,7 @@ def main():
         np.random.seed(curr_seed)
         
         convergence_history = []
+        cumulative_shots_history = []  # 记录累计shots数
 
         def objective_function(params):
             """
@@ -301,8 +320,9 @@ def main():
             # 使用CVaR策略计算能量
             energy = calculate_cvar_energy(counts, qubit_op, args.alpha)
             
-            # 记录收敛历史，用于分析优化过程
+            # 记录收敛历史和shots数，用于分析优化过程
             convergence_history.append(energy)
+            cumulative_shots_history.append(args.shots * len(convergence_history))  # 累计shots数
             
             # 每隔一次迭代打印一次进度（避免过多输出）
             if len(convergence_history) % 2 == 0:
@@ -314,7 +334,7 @@ def main():
         res = minimize(objective_function, initial_params, method='COBYLA', 
                        options={'maxiter': args.max_optimization_iterations})
         
-        all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history})
+        all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history, 'cumulative_shots': cumulative_shots_history.copy()})
 
         # --- 结果解析与保存 ---
         print(f"    - 正在分析最优结果...")
@@ -355,6 +375,12 @@ def main():
             "energy": energy,
             "turn_sequence": result.turn_sequence,
             "main_chain_sequence": args.main_chain,
+            "shots_requested": args.shots,
+            "optimization_convergence": {
+                "evaluation_counts": list(range(len(convergence_history))),
+                "energy_values": convergence_history,
+                "cumulative_shots": cumulative_shots_history
+            },
             "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None else []
         }
         json_path = os.path.join(RESULT_DIR, f'result_{i+1}_energy_{energy:.4f}.json')
@@ -377,15 +403,57 @@ def main():
             print(f"    ⚠ 绘图失败: {e}")
 
     # 生成优化过程的收敛图
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 8))
     for idx, data in enumerate(all_conv_data):
-        plt.plot(data['counts'], data['values'], label=f'Run {idx+1}')
+        plt.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}', linewidth=2)
     plt.xlabel("Evaluation Counts")
     plt.ylabel("Energy")
     plt.title(f"VQE Sampler Convergence ({args.main_chain})")
     plt.legend()
-    plt.grid(True)
+    plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(RESULT_DIR, "vqe_optimization_summary.png"))
+    plt.close()
+    
+    # 双y轴图：展示能量和shots的关系（改进版）
+    if all('cumulative_shots' in data and len(data['cumulative_shots']) > 0 for data in all_conv_data):
+        fig, ax1 = plt.subplots(figsize=(12, 8))
+        
+        # 定义颜色映射，为每个运行结果使用相同颜色的不同样式
+        colors = plt.cm.tab10(np.linspace(0, 1, len(all_conv_data)))
+        
+        # 绘制能量曲线
+        energy_lines = []
+        for idx, data in enumerate(all_conv_data):
+            color = colors[idx]
+            line, = ax1.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}', 
+                     linewidth=3, color=color)  # 增加线宽使能量曲线更突出
+            energy_lines.append(line)
+        ax1.set_xlabel('Evaluation Counts')
+        ax1.set_ylabel('Energy', color='black')
+        ax1.tick_params(axis='y', labelcolor='black')
+        ax1.grid(True, alpha=0.3)
+        
+        # 创建第二个y轴用于shots
+        shots_bars = []
+        ax2 = ax1.twinx()
+        for idx, data in enumerate(all_conv_data):
+            color = colors[idx]
+            # 使用较浅的颜色和边框来减少柱状图的视觉冲击
+            bars = ax2.bar(data['counts'], data['cumulative_shots'], alpha=0.95, width=0.3, 
+                   color=color, edgecolor=color, linewidth=0.5, 
+                   label=f'Run {idx+1} Cumulative Shots')
+            shots_bars.append(bars)
+        ax2.set_ylabel('Cumulative Shots', color='black')
+        ax2.tick_params(axis='y', labelcolor='black')
+        
+        # 只使用能量曲线的图例，避免重复
+        ax1.legend(energy_lines, [f'Run {idx+1}' for idx in range(len(energy_lines))], loc='upper left')
+        
+        plt.title(f"VQE Sampler Convergence with Cumulative Shots ({args.main_chain})")
+        fig.tight_layout()
+        plt.savefig(os.path.join(RESULT_DIR, "vqe_sampler_optimization_with_shots.png"))
+        plt.close()
+        print(f"✓ 带shots信息的VQE采样器优化图已保存为 {os.path.join(RESULT_DIR, 'vqe_sampler_optimization_with_shots.png')}")
     
     print(f"\n🎉 蛋白质折叠计算任务完成！所有结果保存在: {RESULT_DIR}")
 

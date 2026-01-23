@@ -50,7 +50,7 @@ warnings.filterwarnings('ignore')
 # 参数配置
 # ====================
 parser = argparse.ArgumentParser()
-parser.add_argument('--backend', default='local', help='local, aws_sv1, aws_garnet, aws_ionq, aws_forte, ibm, ibm_simulator')
+parser.add_argument('--backend', default='local', help='local (本地模拟器，优先使用AerSimulator), local_aer (强制使用AerSimulator), aws_sv1, aws_garnet, aws_ionq, aws_forte, ibm, ibm_simulator')
 parser.add_argument('--random_seed', type=int, default=23)
 parser.add_argument('--max_optimization_iterations', type=int, default=10)
 parser.add_argument('--ansatz_reps', type=int, default=1)
@@ -164,10 +164,39 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
                     from qiskit.primitives import StatevectorEstimator
                     info['estimator'] = StatevectorEstimator()
                     print("  ✓ 已回退到本地 StatevectorEstimator")
+        elif backend_name.lower() == 'local_aer':
+            # 使用AerSimulator作为本地后端
+            try:
+                from qiskit_aer import AerSimulator
+                from qiskit.primitives import BackendEstimatorV2
+                backend = AerSimulator()
+                estimator = BackendEstimatorV2(backend=backend)
+                estimator.options.default_precision = 1 / (shots**0.5)
+                estimator.options.default_shots = shots
+                info['backend'] = backend
+                info['estimator'] = estimator
+                print("✓ 本地 AerSimulator (V2 Estimator) 已就绪")
+            except ImportError:
+                print("⚠ AerSimulator 不可用，回退到 StatevectorEstimator")
+                from qiskit.primitives import StatevectorEstimator
+                info['estimator'] = StatevectorEstimator()
+                print("  ✓ 已回退到本地 StatevectorEstimator")
         else:
-            from qiskit.primitives import StatevectorEstimator
-            info['estimator'] = StatevectorEstimator()
-            print("✓ 本地 StatevectorEstimator 已就绪")
+            # 默认本地后端，优先使用AerSimulator，如果不可用则回退到StatevectorEstimator
+            try:
+                from qiskit_aer import AerSimulator
+                from qiskit.primitives import BackendEstimatorV2
+                backend = AerSimulator()
+                estimator = BackendEstimatorV2(backend=backend)
+                estimator.options.default_precision = 1 / (shots**0.5)
+                estimator.options.default_shots = shots
+                info['backend'] = backend
+                info['estimator'] = estimator
+                print("✓ 本地 AerSimulator (V2 Estimator) 已就绪")
+            except ImportError:
+                from qiskit.primitives import StatevectorEstimator
+                info['estimator'] = StatevectorEstimator()
+                print("✓ 本地 StatevectorEstimator 已就绪")
         return info
     except Exception as e:
         print(f"✗ 后端设置失败: {e}")
@@ -194,14 +223,56 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
                                   optimization_level=3)
         print(f"   VQE电路转译: 逻辑比特数={working_ansatz.num_qubits}, 物理比特数={working_ansatz.width()}")
 
-    convergence = {'counts': [], 'values': []}
+    convergence = {'counts': [], 'values': [], 'cumulative_shots': []}
+    
+    # 存储每次评估的实际shots数
+    actual_shots_list = []
+    
+    def record_shots_from_metadata(metadata):
+        """从元数据中提取实际执行的shots数"""
+        actual_shots = 0
+        if "shots_per_circuit" in metadata:
+            actual_shots = sum(metadata["shots_per_circuit"])
+        elif "execution" in metadata and "circuits" in metadata["execution"]:
+            actual_shots = sum(c["shots"] for c in metadata["execution"]["circuits"])
+        elif "shots" in metadata:
+            shots_per_circuit = metadata["shots"]
+            num_circuits = metadata.get("num_circuits", 1)
+            actual_shots = shots_per_circuit * num_circuits
+        return actual_shots
+    
     def callback(eval_count, parameters, mean, std):
         convergence['counts'].append(eval_count)
         convergence['values'].append(mean)
+        
+        # 在实际应用中，每次评估可能涉及多个Pauli项，所以实际shots数可能高于设定值
+        # 这里我们用一个更现实的估算：假设每次评估涉及多个量子电路执行
+        # 具体数值取决于哈密顿量的Pauli项数量
+        current_step_shots = args.shots  # 这是基础值，实际值会在VQE完成后修正
+        actual_shots_list.append(current_step_shots)
+        
+        # 计算累计shots数
+        cumulative_shots = sum(actual_shots_list)
+        convergence['cumulative_shots'].append(cumulative_shots)
 
     # 使用处理后的 working_ansatz，现在使用 VQE 配合 estimator
     vqe = VQE(estimator=estimator, ansatz=working_ansatz, optimizer=optimizer, callback=callback)
     result = vqe.compute_minimum_eigenvalue(qubit_op)
+    
+    # 为了更准确地记录shots数，我们需要使用一个包装器来捕获estimator的调用
+    # 但由于VQE内部的工作方式，我们只能在VQE结束后获取总的元数据
+    if hasattr(result, 'metadata') and result.metadata:
+        # 尝试从最终结果的元数据中获取总shots数
+        total_shots_from_metadata = record_shots_from_metadata(result.metadata)
+        if total_shots_from_metadata > 0:
+            # 如果能从元数据获取到总shots数，则更新整个收敛过程中的shots数
+            # 这是一个近似方法，因为无法知道每次评估的具体shots数
+            # 更精确的实现需要自定义estimator或回调机制
+            if len(convergence['cumulative_shots']) > 0:
+                # 基于评估次数平均分配总shots数
+                avg_shots_per_eval = max(1, total_shots_from_metadata // len(convergence['cumulative_shots']))
+                convergence['cumulative_shots'] = [i * avg_shots_per_eval for i in range(1, len(convergence['cumulative_shots']) + 1)]
+    
     return result, convergence
 
 
@@ -405,6 +476,12 @@ def main():
             "turn_sequence": result.turn_sequence,
             "main_chain_sequence": args.main_chain,
             "sequence": args.main_chain,
+            "shots_requested": args.shots,
+            "optimization_convergence": {
+                "evaluation_counts": conv_data['counts'],
+                "energy_values": conv_data['values'],
+                "cumulative_shots": conv_data['cumulative_shots']
+            },
             "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None and len(xyz_data) > 0 else []
         }
         
@@ -440,19 +517,64 @@ def main():
     # 汇总绘图
     try:
         print(f"\n正在生成VQE优化过程的折线图...")
-        plt.figure(figsize=(10, 6))
+            
+        # 基础版本：仅能量收敛图
+        plt.figure(figsize=(12, 8))
         for idx, data in enumerate(all_conv_data):
-            plt.plot(data['counts'], data['values'], label=f'Run {idx+1}')
+            plt.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}')
         plt.xlabel("Evaluation Counts")
         plt.ylabel("Energy")
         plt.title(f"VQE Convergence Comparison ({args.main_chain})")
         plt.legend()
-        plt.grid(True)
+        plt.grid(True, alpha=0.3)
         plt.savefig(os.path.join(RESULT_DIR, "vqe_optimization_summary.png"))
         plt.close()
         print(f"✓ VQE优化过程图已保存为 {os.path.join(RESULT_DIR, 'vqe_optimization_summary.png')}")
+            
+        # 双y轴图：展示能量和shots的关系（改进版）
+        if all('cumulative_shots' in data and len(data['cumulative_shots']) > 0 for data in all_conv_data):
+            fig, ax1 = plt.subplots(figsize=(12, 8))
+            
+            # 定义颜色映射，为每个运行结果使用相同颜色的不同样式
+            colors = plt.cm.tab10(np.linspace(0, 1, len(all_conv_data)))
+            
+            # 绘制能量曲线
+            energy_lines = []
+            for idx, data in enumerate(all_conv_data):
+                color = colors[idx]
+                line, = ax1.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}', 
+                         linewidth=3, color=color)  # 增加线宽使能量曲线更突出
+                energy_lines.append(line)
+            ax1.set_xlabel('Evaluation Counts')
+            ax1.set_ylabel('Energy', color='black')
+            ax1.tick_params(axis='y', labelcolor='black')
+            ax1.grid(True, alpha=0.3)
+            
+            # 创建第二个y轴用于shots
+            shots_bars = []
+            ax2 = ax1.twinx()
+            for idx, data in enumerate(all_conv_data):
+                color = colors[idx]
+                # 使用较浅的颜色和边框来减少柱状图的视觉冲击
+                bars = ax2.bar(data['counts'], data['cumulative_shots'], alpha=0.95, width=0.3, 
+                       color=color, edgecolor=color, linewidth=0.5, 
+                       label=f'Run {idx+1} Cumulative Shots')
+                shots_bars.append(bars)
+            ax2.set_ylabel('Cumulative Shots', color='black')
+            ax2.tick_params(axis='y', labelcolor='black')
+            
+            # 只使用能量曲线的图例，避免重复
+            ax1.legend(energy_lines, [f'Run {idx+1}' for idx in range(len(energy_lines))], loc='upper left')
+            
+            plt.title(f"VQE Convergence with Cumulative Shots ({args.main_chain})")
+            fig.tight_layout()
+            plt.savefig(os.path.join(RESULT_DIR, "vqe_optimization_with_shots.png"))
+            plt.close()
+            print(f"✓ 带shots信息的VQE优化图已保存为 {os.path.join(RESULT_DIR, 'vqe_optimization_with_shots.png')}")
+            
     except Exception as e:
         print(f"⚠ 生成VQE优化过程图时出错: {e}")
+    
 
     print(f"\n✓ 蛋白质折叠计算完成！")
     print(f"🎉 任务完成。结果目录: {RESULT_DIR}")

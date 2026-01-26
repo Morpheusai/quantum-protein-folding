@@ -1,0 +1,164 @@
+"""Factory module for creating quantum backend samplers."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from qiskit.providers.backend import BackendV2
+
+from backend.transpiling_sampler import TranspilingSampler
+from constants import (
+    BACKEND_TYPE,
+    IBM_QUANTUM_BACKEND_NAME,
+    IBM_QUANTUM_SHOTS,
+    IBM_QUANTUM_TOKEN,
+)
+from enums import BackendType
+from exceptions import InvalidBackendError
+from logger import get_logger
+
+if TYPE_CHECKING:
+    from qiskit.primitives import BaseSamplerV2
+
+logger = get_logger()
+
+
+def get_sampler() -> tuple[BaseSamplerV2, BackendV2 | None]:
+    """Get the appropriate sampler based on the configured backend type.
+
+    Returns:
+        tuple[BaseSamplerV2, BackendV2 | None]: Configured sampler instance and backend (None for local statevector).
+
+    Raises:
+        InvalidBackendError: If the backend type is not supported or configuration is invalid.
+
+    """
+    if BACKEND_TYPE == BackendType.LOCAL_STATEVECTOR:
+        return _get_local_statevector_sampler(), None
+    if BACKEND_TYPE == BackendType.IBM_QUANTUM:
+        return _get_ibm_quantum_sampler()
+    if BACKEND_TYPE == BackendType.AWS_SIM_QUANTUM:
+        return _get_aws_sim_quantum_sampler()
+    if BACKEND_TYPE == BackendType.AWS_QC_QUANTUM:
+        return _get_aws_qc_quantum_sampler()
+
+    msg: str = f"Unsupported backend type: {BACKEND_TYPE}"
+    raise InvalidBackendError(msg)
+
+
+def _get_local_statevector_sampler() -> BaseSamplerV2:
+    """Get a local statevector sampler for ideal simulation.
+
+    Returns:
+        BaseSamplerV2: Local statevector sampler instance.
+
+    """
+    from qiskit.primitives import StatevectorSampler
+
+    logger.info("Using local StatevectorSampler (ideal simulation)")
+    return StatevectorSampler()
+
+def _get_aws_sim_quantum_sampler() -> tuple[BaseSamplerV2, BackendV2]:
+    """Get a remote sampler for AWS Quantum.
+
+    Returns:
+        tuple[BaseSamplerV2, BackendV2]: Remote sampler instance and backend instance.
+
+    """
+    from qiskit_braket_provider import BraketProvider, BraketSampler
+    provider = BraketProvider()
+    backend = provider.get_backend('SV1')
+    aws_sv1_sampler = BraketSampler(backend=backend)
+    aws_sv1_sampler.options.default_shots = IBM_QUANTUM_SHOTS
+
+    sampler = TranspilingSampler(sampler=aws_sv1_sampler, backend=backend)
+
+    logger.info("Configured with %s shots", IBM_QUANTUM_SHOTS)
+    logger.info("Circuits will be transpiled automatically before execution")
+
+    return sampler, backend
+
+def _get_aws_qc_quantum_sampler() -> tuple[BaseSamplerV2, BackendV2]:
+    """Get a remote sampler for AWS Quantum.
+
+    Returns:
+        tuple[BaseSamplerV2, BackendV2]: Remote sampler instance and backend instance.
+
+    """
+    from qiskit_braket_provider import BraketProvider, BraketSampler
+    provider = BraketProvider()                                                                                                                                     
+    backend = provider.get_backend('Garnet')
+    aws_garnet_sampler = BraketSampler(backend=backend)
+
+    sampler = TranspilingSampler(sampler=aws_garnet_sampler, backend=backend)
+
+    logger.info("Configured with %s shots", IBM_QUANTUM_SHOTS)
+    logger.info("Circuits will be transpiled automatically before execution")
+
+    return sampler, backend
+
+
+def _get_ibm_quantum_sampler() -> tuple[BaseSamplerV2, BackendV2]:
+    """Get a sampler for IBM Quantum hardware with automatic transpilation.
+
+    Requires qiskit-ibm-runtime package and valid IBM Quantum credentials.
+
+    Returns:
+        tuple[BaseSamplerV2, BackendV2]: Transpiling sampler wrapping IBM SamplerV2 and the backend object.
+
+    Raises:
+        InvalidBackendError: If either IBM runtime package is not installed, credentials are missing or backend is not operational.
+
+    """
+    from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
+    from qiskit_ibm_runtime.models.backend_status import BackendStatus
+
+    token: str | None = IBM_QUANTUM_TOKEN
+    backend_name: str | None = IBM_QUANTUM_BACKEND_NAME
+
+    if not token:
+        msg: str = (
+            "IBM Quantum token not configured. Set IBM_QUANTUM_TOKEN in constants.py "
+            "or as environment variable."
+        )
+        raise InvalidBackendError(msg)
+
+    if not backend_name:
+        msg: str = (
+            "IBM Quantum backend name not configured. Set IBM_QUANTUM_BACKEND_NAME in constants.py "
+            "or as environment variable."
+        )
+        raise InvalidBackendError(msg)
+
+    logger.info("Connecting to IBM Quantum service...")
+    service = QiskitRuntimeService(channel="ibm_quantum_platform", token=token)
+
+    backend: BackendV2 = service.backend(backend_name)
+
+    if hasattr(backend, "status"):
+        backend_status: BackendStatus = backend.status()
+
+        logger.info("Using IBM Quantum backend: %s", backend_status.backend_name)
+        logger.info("Backend status message: %s", backend_status.status_msg)
+        logger.info("Pending jobs on backend: %d", backend_status.pending_jobs)
+        if not backend_status.operational:
+            msg: str = (
+                f"Selected backend '{backend_status.backend_name}' is not operational."
+            )
+            raise InvalidBackendError(msg)
+        logger.info("Backend is operational.")
+    else:
+        logger.info("Using IBM Quantum backend: %s", backend_name)
+        logger.warning(
+            "Cannot retrieve backend status. Proceeding without status check."
+        )
+
+    ibm_sampler = SamplerV2(mode=backend)
+    ibm_sampler.options.default_shots = IBM_QUANTUM_SHOTS
+
+    sampler = TranspilingSampler(sampler=ibm_sampler, backend=backend)
+
+    logger.info("Configured with %s shots", IBM_QUANTUM_SHOTS)
+    logger.info("Circuits will be transpiled automatically before execution")
+
+    return sampler, backend

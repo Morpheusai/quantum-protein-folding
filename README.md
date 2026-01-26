@@ -40,3 +40,51 @@ python structure2pic.py --input results/20260107_145139_local/result_xxx.json
 python structure2pic.py --input results/example.xyz
 
 ```
+# 版本代码说明
+```
+1. run_opt
+   run_opt_sample.py
+   我们基于qiskit-community/quantum-protein-folding修改的两个文件
+2. qthesis-pf
+   原始link: https://github.com/QFold-Thesis/quantum-protein-folding
+   修改文件：src/enums.py
+   class BackendType(Enum):
+    """Enum representing quantum backend types for VQE execution."""
+        
+    LOCAL_STATEVECTOR = "local_statevector"
+    IBM_QUANTUM = "ibm_quantum"
+    AWS_SIM_QUANTUM = "aws_sim_quantum"
+    AWS_QC_QUANTUM = "aws_qc_quantum"  
+
+   修改文件：src/constants.py
+   #BACKEND_TYPE: BackendType = BackendType.LOCAL_STATEVECTOR
+   #BACKEND_TYPE: BackendType = BackendType.IBM_QUANTUM
+   #BACKEND_TYPE: BackendType = BackendType.AWS_SIM_QUANTUM #AWS 模拟器
+    BACKEND_TYPE: BackendType = BackendType.AWS_QC_QUANTUM #AWS QC真机
+
+   修改文件：src/backend/backend_factory.py
+    添加：_get_aws_sim_quantum_sampler
+         _get_aws_qc_quantum_sampler
+    添加逻辑参考：_get_ibm_quantum_sampler
+
+    运行环境：同1
+    实际aws机器运行错误：模拟器 -> 不支持program sets方法, 这个确实在AWS模拟器使用说明
+                      真机 -> 电路错误、不支持: Cannot measure previously measured qubit {qubit_index}
+                              这个说明_get_ibm_quantum_sampler中的TranspilingSampler对AWS真机不适用
+3. stfc-qf
+   原始link: https://github.com/stfc/quantum-protein-folding.git
+   create_energy_files.py
+   calculate_exact_energies.py
+   这两步可以按照官方执行 run.sh:
+        export PROJECT_ROOT="/home/ubuntu/workspace/stfc/quantum-protein-folding"
+        python scripts/create_energy_files.py -p 2residue.pdb --num_rot 3 -i 0
+        python scripts/calculate_exact_energies.py --num_res 2 --num_rot 3
+        python scripts/run_qaoa.py -p 2 --num_res 2 --num_rot 3
+    实际第3步的run_qaoa.py中，最新版本的qiskit和repo本身对应的qiskit版本都出错，还未进行系统debug
+
+4. QuPepFold
+   原始link: 
+   修改文件：QuPepFold/qupepfold/qupepfold.py
+   添加AWS真机代码：read_cli_inputs -> backend_mode
+   运行环境：同1，当前可以成功运行
+``` 

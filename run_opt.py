@@ -64,7 +64,7 @@ parser.add_argument('--aws_region', default=None)
 args = parser.parse_args()
 
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-RESULT_DIR = os.path.join("results", f"{TIMESTAMP}_{args.backend}")
+RESULT_DIR = os.path.join("results", f"{TIMESTAMP}_{args.backend}_estimator")
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 
@@ -223,7 +223,7 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
                                   optimization_level=3)
         print(f"   VQE电路转译: 逻辑比特数={working_ansatz.num_qubits}, 物理比特数={working_ansatz.width()}")
 
-    convergence = {'counts': [], 'values': [], 'cumulative_shots': []}
+    convergence = {'counts': [], 'values': [], 'cumulative_shots': [], 'iteration_shots': []}
     
     # 存储每次评估的实际shots数
     actual_shots_list = []
@@ -250,6 +250,7 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
         # 具体数值取决于哈密顿量的Pauli项数量
         current_step_shots = args.shots  # 这是基础值，实际值会在VQE完成后修正
         actual_shots_list.append(current_step_shots)
+        convergence['iteration_shots'].append(current_step_shots)  # 记录每次迭代的实际shots数
         
         # 计算累计shots数
         cumulative_shots = sum(actual_shots_list)
@@ -521,52 +522,53 @@ def main():
         # 基础版本：仅能量收敛图
         plt.figure(figsize=(12, 8))
         for idx, data in enumerate(all_conv_data):
-            plt.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}')
+            plt.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}', linewidth=2)
+        
         plt.xlabel("Evaluation Counts")
         plt.ylabel("Energy")
         plt.title(f"VQE Convergence Comparison ({args.main_chain})")
-        plt.legend()
+        plt.legend(loc='upper right')
         plt.grid(True, alpha=0.3)
         plt.savefig(os.path.join(RESULT_DIR, "vqe_optimization_summary.png"))
         plt.close()
         print(f"✓ VQE优化过程图已保存为 {os.path.join(RESULT_DIR, 'vqe_optimization_summary.png')}")
             
-        # 双y轴图：展示能量和shots的关系（改进版）
-        if all('cumulative_shots' in data and len(data['cumulative_shots']) > 0 for data in all_conv_data):
+        # 双y轴图：展示能量和每次迭代的shots数（改进版）
+        if all('iteration_shots' in data and len(data['iteration_shots']) > 0 for data in all_conv_data):
             fig, ax1 = plt.subplots(figsize=(12, 8))
             
             # 定义颜色映射，为每个运行结果使用相同颜色的不同样式
             colors = plt.cm.tab10(np.linspace(0, 1, len(all_conv_data)))
             
-            # 绘制能量曲线
+            # 创建第二个y轴用于shots（先绘制shots，这样折线图会显示在上面）
+            shots_bars = []
+            ax2 = ax1.twinx()
+            # 使用每次迭代的实际shots数，而不是累计shots
+            # 统一使用灰色，与 run_opt_sampler.py 保持一致
+            for idx, data in enumerate(all_conv_data):
+                bars = ax2.bar(data['counts'], data['iteration_shots'], alpha=0.15, width=0.5, 
+                       color='gray', edgecolor='gray', linewidth=0.5, 
+                       label=f'Run {idx+1} Shots per Iteration')
+                shots_bars.append(bars)
+            ax2.set_ylabel('Shots per Iteration', color='black')
+            ax2.tick_params(axis='y', labelcolor='black')
+            
+            # 绘制能量曲线（后绘制，这样会显示在shots柱状图上面）
             energy_lines = []
             for idx, data in enumerate(all_conv_data):
                 color = colors[idx]
                 line, = ax1.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}', 
-                         linewidth=3, color=color)  # 增加线宽使能量曲线更突出
+                         linewidth=3, color=color)
                 energy_lines.append(line)
             ax1.set_xlabel('Evaluation Counts')
             ax1.set_ylabel('Energy', color='black')
             ax1.tick_params(axis='y', labelcolor='black')
             ax1.grid(True, alpha=0.3)
             
-            # 创建第二个y轴用于shots
-            shots_bars = []
-            ax2 = ax1.twinx()
-            for idx, data in enumerate(all_conv_data):
-                color = colors[idx]
-                # 使用较浅的颜色和边框来减少柱状图的视觉冲击
-                bars = ax2.bar(data['counts'], data['cumulative_shots'], alpha=0.95, width=0.3, 
-                       color=color, edgecolor=color, linewidth=0.5, 
-                       label=f'Run {idx+1} Cumulative Shots')
-                shots_bars.append(bars)
-            ax2.set_ylabel('Cumulative Shots', color='black')
-            ax2.tick_params(axis='y', labelcolor='black')
-            
             # 只使用能量曲线的图例，避免重复
-            ax1.legend(energy_lines, [f'Run {idx+1}' for idx in range(len(energy_lines))], loc='upper left')
+            ax1.legend(energy_lines, [f'Run {idx+1}' for idx in range(len(energy_lines))], loc='upper right')
             
-            plt.title(f"VQE Convergence with Cumulative Shots ({args.main_chain})")
+            plt.title(f"VQE Convergence with Shots per Iteration ({args.main_chain})")
             fig.tight_layout()
             plt.savefig(os.path.join(RESULT_DIR, "vqe_optimization_with_shots.png"))
             plt.close()

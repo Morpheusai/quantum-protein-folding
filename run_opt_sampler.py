@@ -54,7 +54,7 @@ parser.add_argument('--penalty_chiral', type=float, default=10, help='手性约�
 parser.add_argument('--penalty_local_overlap', type=float, default=10, help='局部重叠惩罚系数')
 parser.add_argument('--alpha', type=float, default=0.1, help='CVaR参数: 选择最低能量的alpha比例样本')
 parser.add_argument('--shots', type=int, default=100, help='量子测量采样次数')
-parser.add_argument('--max_results', type=int, default=1, help='计算结果的最大数量')
+parser.add_argument('--max_results', type=int, default=1, help='每次迭代的结果数量')
 parser.add_argument('--aws_region', default=None, help='AWS区域设置（可选）')
 args = parser.parse_args()
 
@@ -226,6 +226,32 @@ def calculate_cvar_energy(counts, qubit_op, alpha):
     # 返回最低能量样本的平均值
     return np.mean(energies[:num_keep])
 
+def extract_top_results(counts, qubit_op, top_n):
+    """
+    从量子测量结果中提取能量最低的top_n个结果
+    
+    Args:
+        counts (dict): 量子测量结果，键为比特串，值为出现次数
+        qubit_op: 量子比特哈密顿量算子
+        top_n (int): 需要提取的最优结果数量
+        
+    Returns:
+        list: 包含top_n个最优结果的列表，每个元素为(bitstring, energy, count)元组
+    """
+    # 计算每个比特串的能量
+    bitstring_energies = []
+    for bitstring, count in counts.items():
+        energy = estimate_energy_from_bitstring(bitstring, qubit_op)
+        bitstring_energies.append((bitstring, energy, count))
+    
+    # 按能量值升序排列
+    bitstring_energies.sort(key=lambda x: x[1])
+    
+    # 提取能量最低的top_n个结果
+    top_results = bitstring_energies[:top_n]
+    
+    return top_results
+
 # ====================
 # 主计算流程
 # ====================
@@ -289,133 +315,218 @@ def main():
     print(f"   逻辑比特数 (算法需求): {clean_circuit.num_qubits}")
     print(f"   转译后物理比特数 (硬件占用): {transpiled_circuit.num_qubits}")
     all_conv_data = []
-    for i in range(args.max_results):
-        print(f"\n--- 实验 {i+1}/{args.max_results} ---")
-        curr_seed = args.random_seed + i
-        np.random.seed(curr_seed)
-        
-        convergence_history = []
-        cumulative_shots_history = []  # 记录累计shots数
+    
+    # 单次运行，用户如需重复运行可重新调用
+    print(f"\n--- 实验 1/1 ---")
+    np.random.seed(args.random_seed)
+    
+    convergence_history = []
+    cumulative_shots_history = []  # 记录累计shots数
+    iteration_shots_history = []  # 记录每次迭代的实际shots数
+    iteration_results = []  # 记录每次迭代的多个结果
+    
+    # 存储每次迭代的多个最优结果的能量值，用于生成收敛图
+    all_top_energies = []
 
-        def objective_function(params):
-            """
-            优化目标函数
-            该函数接受参数，执行量子电路，计算CVaR能量，并返回用于优化的值
+    def objective_function(params):
+        """
+        优化目标函数
+        该函数接受参数，执行量子电路，使用CVaR策略计算能量，并返回用于优化的值
+        
+        Args:
+            params: 变分参数数组
             
-            Args:
-                params: 变分参数数组
-                
-            Returns:
-                float: CVaR能量值（优化目标）
-            """
-            # 将参数绑定到量子电路
-            bound_circ = transpiled_circuit.assign_parameters(params)
-            
-            # 在选定的后端上执行量子电路
-            job = backend.run(bound_circ, shots=args.shots)
-            
-            # 获取量子测量结果
-            counts = job.result().get_counts()
-            
-            # 使用CVaR策略计算能量
-            energy = calculate_cvar_energy(counts, qubit_op, args.alpha)
-            
-            # 记录收敛历史和shots数，用于分析优化过程
-            convergence_history.append(energy)
-            cumulative_shots_history.append(args.shots * len(convergence_history))  # 累计shots数
-            
-            # 每隔一次迭代打印一次进度（避免过多输出）
-            if len(convergence_history) % 2 == 0:
-                print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}")
-            return energy
+        Returns:
+            float: CVaR能量值（优化目标）
+        """
+        # 将参数绑定到量子电路
+        bound_circ = transpiled_circuit.assign_parameters(params)
+        
+        # 在选定的后端上执行量子电路
+        job = backend.run(bound_circ, shots=args.shots)
+        
+        # 获取量子测量结果
+        counts = job.result().get_counts()
+        
+        # 计算实际消耗的 shots 数
+        actual_shots = sum(counts.values())
+        
+        # 使用CVaR策略计算能量（与原始版本一致，更稳定）
+        energy = calculate_cvar_energy(counts, qubit_op, args.alpha)
+        
+        # 同时提取多个最优结果用于后续分析
+        top_results = extract_top_results(counts, qubit_op, args.max_results)
+        top_energies = [result[1] for result in top_results]
+        
+        # 记录收敛历史和shots数，用于分析优化过程
+        convergence_history.append(energy)
+        iteration_shots_history.append(actual_shots)  # 记录每次迭代的实际shots数
+        # 使用实际消耗的 shots 数进行累加
+        if cumulative_shots_history:
+            cumulative_shots_history.append(cumulative_shots_history[-1] + actual_shots)
+        else:
+            cumulative_shots_history.append(actual_shots)
+        
+        # 记录每次迭代的多个最优结果的能量值
+        all_top_energies.append(top_energies)
+        
+        # 每隔一次迭代打印一次进度（避免过多输出）
+        if len(convergence_history) % 2 == 0:
+            print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}, 实际shots = {actual_shots}")
+            print(f"    各最优结果能量: {[round(e, 4) for e in top_energies]}")
+        
+        # 保存所有结果用于后续分析
+        iteration_data = {
+            "iteration": len(convergence_history),
+            "cvar_energy": energy,
+            "top_energies": top_energies,
+            "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
+            "total_counts": len(counts),
+            "actual_shots": actual_shots
+        }
+        iteration_results.append(iteration_data)
+        
+        return energy
 
-        # 开始优化 (使用 COBYLA)
-        initial_params = np.random.uniform(-np.pi, np.pi, ansatz.num_parameters)
-        res = minimize(objective_function, initial_params, method='COBYLA', 
-                       options={'maxiter': args.max_optimization_iterations})
-        
-        all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history, 'cumulative_shots': cumulative_shots_history.copy()})
+    # 开始优化 (使用 COBYLA)
+    initial_params = np.random.uniform(-np.pi, np.pi, ansatz.num_parameters)
+    res = minimize(objective_function, initial_params, method='COBYLA', 
+                   options={'maxiter': args.max_optimization_iterations})
+    
+    # 添加CVaR能量收敛曲线
+    all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history, 'cumulative_shots': cumulative_shots_history.copy(), 'label': 'CVaR Energy'})
+    
+    # 添加每个最优结果的收敛曲线
+    if all_top_energies:
+        for i in range(args.max_results):
+            # 提取第i个最优结果的能量值
+            top_i_energies = [energies[i] if i < len(energies) else None for energies in all_top_energies]
+            # 过滤掉None值
+            valid_counts = []
+            valid_energies = []
+            for j, energy in enumerate(top_i_energies):
+                if energy is not None:
+                    valid_counts.append(j)
+                    valid_energies.append(energy)
+            # 添加到all_conv_data
+            all_conv_data.append({'counts': valid_counts, 'values': valid_energies, 'cumulative_shots': cumulative_shots_history[:len(valid_counts)], 'label': f'Top {i+1} Energy'})
 
-        # --- 结果解析与保存 ---
-        print(f"    - 正在分析最优结果...")
+    # --- 结果解析与保存 ---
+    print(f"    - 正在分析最优结果...")
+    
+    # 使用最优参数生成最终量子电路并执行测量
+    final_bound_circuit = transpiled_circuit.assign_parameters(res.x)
+    final_job = backend.run(final_bound_circuit, shots=args.shots)
+    final_counts = final_job.result().get_counts()
+    total_shots = sum(final_counts.values())
+    
+    # 提取能量最低的多个最优结果
+    final_top_results = extract_top_results(final_counts, qubit_op, args.max_results)
+    total_shots = sum(final_counts.values())
+    
+    # 处理迭代结果，只保存必要的信息以减少文件大小
+    processed_iteration_results = []
+    for iter_data in iteration_results:
+        # 处理top_results，确保所有值都是可JSON序列化的
+        processed_top_results = []
+        for top_result in iter_data.get("top_results", []):
+            processed_result = {
+                "bitstring": top_result[0],
+                "energy": float(top_result[1]),
+                "count": top_result[2]
+            }
+            processed_top_results.append(processed_result)
         
-        # 使用最优参数生成最终量子电路并执行测量
-        final_bound_circuit = transpiled_circuit.assign_parameters(res.x)
-        final_job = backend.run(final_bound_circuit, shots=args.shots)
-        final_counts = final_job.result().get_counts()
-        total_shots = sum(final_counts.values())
+        processed_iter = {
+            "iteration": iter_data["iteration"],
+            "cvar_energy": iter_data["cvar_energy"],
+            "top_energies": [float(e) for e in iter_data.get("top_energies", [])],
+            "top_results": processed_top_results,
+            "total_counts": iter_data.get("total_counts", 0),
+            "actual_shots": iter_data.get("actual_shots", 0)
+        }
+        processed_iteration_results.append(processed_iter)
+    
+    # 为每个最优结果生成蛋白质结构和文件
+    for idx, (bitstring, energy, count) in enumerate(final_top_results):
+        print(f"\n    - 结果 {idx+1}/{args.max_results}: 能量 = {energy:.4f}, 出现次数 = {count}")
         
-        # 提取出现频率最高的比特串作为最优解
-        # 注意：这里将比特串反转以符合蛋白质折叠问题的编码约定
-        best_raw_bit = max(final_counts, key=final_counts.get)
-        best_bitstring = best_raw_bit[::-1]  # 反转比特串顺序
-        
-        # 创建模拟结果对象，以兼容蛋白质折叠问题的解释接口
+        # 创建模拟结果对象
         class MockResult:
             def __init__(self, bs, val, counts, total):
                 # 设置最高概率比特串的振幅为1（理想情况）
                 self.eigenstate = {bs: 1.0}
-                # 设置优化得到的最小能量值
+                # 设置优化得到的能量值
                 self.eigenvalue = val
                 # 提供完整的概率分布用于后续分析
                 self.probabilities = {k[::-1]: v/total for k, v in counts.items()}
-
+        
         # 创建模拟结果并解析为蛋白质结构
-        raw_res = MockResult(best_bitstring, res.fun, final_counts, total_shots)
+        raw_res = MockResult(bitstring, energy, final_counts, total_shots)
         result = problem.interpret(raw_res)
         
-        # 提取最终能量值
-        energy = float(res.fun)
-        print(f"    - 最优转向序列: {result.turn_sequence}")
-
+        print(f"    - 转向序列: {result.turn_sequence}")
+        
         # 1. 保存JSON格式的结果参数
         xyz_data = result.protein_shape_file_gen.get_xyz_data()
         result_data = {
-            "result_index": i + 1,
+            "result_index": idx + 1,
             "energy": energy,
             "turn_sequence": result.turn_sequence,
             "main_chain_sequence": args.main_chain,
             "shots_requested": args.shots,
+            "bitstring": bitstring,
+            "count": count,
+            "max_results": args.max_results,
             "optimization_convergence": {
                 "evaluation_counts": list(range(len(convergence_history))),
-                "energy_values": convergence_history,
-                "cumulative_shots": cumulative_shots_history
+                "cvar_energy_values": convergence_history,
+                "cumulative_shots": cumulative_shots_history,
+                "iteration_shots": iteration_shots_history
             },
+            "iteration_results": processed_iteration_results,
             "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None else []
         }
-        json_path = os.path.join(RESULT_DIR, f'result_{i+1}_energy_{energy:.4f}.json')
+        json_path = os.path.join(RESULT_DIR, f'result_{idx+1}_energy_{energy:.4f}.json')
         with open(json_path, 'w') as f:
             json.dump(result_data, f, indent=2)
-
+        print(f"    ✓ JSON文件已保存: {json_path}")
+        
         # 2. 保存详细 PDB 文件
         if xyz_data is not None:
-            pdb_path = os.path.join(RESULT_DIR, f'structure_{i+1}_energy_{energy:.4f}.pdb')
-            convert_xyz_to_detailed_pdb(xyz_data, pdb_path, f"Structure {i+1}")
-            print(f"    ✓ PDB文件已保存")
-
+            pdb_path = os.path.join(RESULT_DIR, f'structure_{idx+1}_energy_{energy:.4f}.pdb')
+            convert_xyz_to_detailed_pdb(xyz_data, pdb_path, f"Structure {idx+1}")
+            print(f"    ✓ PDB文件已保存: {pdb_path}")
+        
         # 3. 保存 3D 结构图
         try:
-            fig_struct = result.get_figure(title=f"Result {i+1} (E={energy:.4f})")
-            png_path = os.path.join(RESULT_DIR, f"structure_{i+1}_energy_{energy:.4f}.png")
+            fig_struct = result.get_figure(title=f"Result {idx+1} (E={energy:.4f})")
+            png_path = os.path.join(RESULT_DIR, f"structure_{idx+1}_energy_{energy:.4f}.png")
             fig_struct.savefig(png_path)
             plt.close(fig_struct)
+            print(f"    ✓ 结构图已保存: {png_path}")
         except Exception as e:
             print(f"    ⚠ 绘图失败: {e}")
 
     # 生成优化过程的收敛图
     plt.figure(figsize=(12, 8))
     for idx, data in enumerate(all_conv_data):
-        plt.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}', linewidth=2)
+        label = data.get('label', f'Run {idx+1}')
+        # CVaR Energy 使用虚线，其他使用实线
+        if 'CVaR' in label:
+            plt.plot(data['counts'], data['values'], marker='o', label=label, linewidth=2, linestyle='--')
+        else:
+            plt.plot(data['counts'], data['values'], marker='o', label=label, linewidth=2)
     plt.xlabel("Evaluation Counts")
     plt.ylabel("Energy")
-    plt.title(f"VQE Sampler Convergence ({args.main_chain})")
-    plt.legend()
+    plt.title(f"VQE Sampler Convergence ({args.main_chain}) - CVaR (alpha={args.alpha})")
+    plt.legend(loc='upper right')
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(RESULT_DIR, "vqe_optimization_summary.png"))
     plt.close()
     
-    # 双y轴图：展示能量和shots的关系（改进版）
-    if all('cumulative_shots' in data and len(data['cumulative_shots']) > 0 for data in all_conv_data):
+    # 双y轴图：展示能量和每次迭代的shots数
+    if iteration_shots_history and len(iteration_shots_history) > 0:
         fig, ax1 = plt.subplots(figsize=(12, 8))
         
         # 定义颜色映射，为每个运行结果使用相同颜色的不同样式
@@ -423,11 +534,19 @@ def main():
         
         # 绘制能量曲线
         energy_lines = []
+        labels = []
         for idx, data in enumerate(all_conv_data):
             color = colors[idx]
-            line, = ax1.plot(data['counts'], data['values'], marker='o', label=f'Run {idx+1}', 
-                     linewidth=3, color=color)  # 增加线宽使能量曲线更突出
+            label = data.get('label', f'Run {idx+1}')
+            # CVaR Energy 使用虚线，其他使用实线
+            if 'CVaR' in label:
+                line, = ax1.plot(data['counts'], data['values'], marker='o', label=label, 
+                         linewidth=3, color=color, linestyle='--')
+            else:
+                line, = ax1.plot(data['counts'], data['values'], marker='o', label=label, 
+                         linewidth=3, color=color)
             energy_lines.append(line)
+            labels.append(label)
         ax1.set_xlabel('Evaluation Counts')
         ax1.set_ylabel('Energy', color='black')
         ax1.tick_params(axis='y', labelcolor='black')
@@ -436,20 +555,17 @@ def main():
         # 创建第二个y轴用于shots
         shots_bars = []
         ax2 = ax1.twinx()
-        for idx, data in enumerate(all_conv_data):
-            color = colors[idx]
-            # 使用较浅的颜色和边框来减少柱状图的视觉冲击
-            bars = ax2.bar(data['counts'], data['cumulative_shots'], alpha=0.95, width=0.3, 
-                   color=color, edgecolor=color, linewidth=0.5, 
-                   label=f'Run {idx+1} Cumulative Shots')
-            shots_bars.append(bars)
-        ax2.set_ylabel('Cumulative Shots', color='black')
+        # 使用每次迭代的实际shots数，而不是累计shots
+        bars = ax2.bar(range(len(iteration_shots_history)), iteration_shots_history, alpha=0.3, width=0.5, 
+               color='gray', edgecolor='gray', linewidth=0.5, 
+               label='Shots per Iteration')
+        ax2.set_ylabel('Shots per Iteration', color='black')
         ax2.tick_params(axis='y', labelcolor='black')
         
         # 只使用能量曲线的图例，避免重复
-        ax1.legend(energy_lines, [f'Run {idx+1}' for idx in range(len(energy_lines))], loc='upper left')
+        ax1.legend(energy_lines, labels, loc='upper right')
         
-        plt.title(f"VQE Sampler Convergence with Cumulative Shots ({args.main_chain})")
+        plt.title(f"VQE Sampler Convergence with Shots per Iteration ({args.main_chain}) - CVaR (alpha={args.alpha})")
         fig.tight_layout()
         plt.savefig(os.path.join(RESULT_DIR, "vqe_sampler_optimization_with_shots.png"))
         plt.close()

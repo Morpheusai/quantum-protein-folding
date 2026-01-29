@@ -55,7 +55,8 @@ from lib.protein_folding_visualizer import ProteinFoldingVisualizer
 # 命令行参数配置
 # =============================================================================
 parser = argparse.ArgumentParser(description='蛋白质折叠量子算法 - Estimator模式')
-parser.add_argument('--backend', default='local',help='量子后端: local (本地模拟器), local_aer (强制AerSimulator), aws_sv1, aws_garnet, aws_ionq, aws_forte, ibm, ibm_simulator')
+parser.add_argument('--backend', default='local', 
+                   help='量子后端: local (本地模拟器), local_aer (强制AerSimulator), aws_sv1, aws_garnet, aws_ionq, aws_forte, ibm, ibm_simulator')
 parser.add_argument('--random_seed', type=int, default=23, help='随机种子')
 parser.add_argument('--max_optimization_iterations', type=int, default=10, help='最大优化迭代次数')
 parser.add_argument('--ansatz_reps', type=int, default=1, help='Ansatz重复次数')

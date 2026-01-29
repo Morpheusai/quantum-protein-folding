@@ -29,7 +29,6 @@ Support classes for :class:`~protein_folding.ProteinFoldingResult`.
 from .protein_plotter import ProteinPlotter
 from .protein_shape_decoder import ProteinShapeDecoder
 from .protein_shape_file_gen import ProteinShapeFileGen
-from .detailed_pdb_generator import DetailedPDBGenerator, convert_xyz_to_detailed_pdb
 
 __all__ = [
     "ProteinPlotter",

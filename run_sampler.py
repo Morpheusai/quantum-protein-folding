@@ -54,22 +54,30 @@ from lib.protein_folding_visualizer import ProteinFoldingVisualizer
 # 2. 命令行参数配置
 # =============================================================================
 parser = argparse.ArgumentParser(description='蛋白质折叠量子算法 - 采样器模式')
+
 # 量子后端配置
 parser.add_argument('--backend', default='local',help='量子后端选择: local (本地模拟器，优先使用AerSimulator), local_aer (强制使用AerSimulator), aws_sv1 (AWS模拟器), aws_garnet (AWS量子芯片), aws_ionq (AWS IonQ量子设备), aws_forte (AWS IonQ Forte量子设备), ibm (IBM量子设备), ibm_simulator (IBM模拟器)')
+
 # 算法参数
 parser.add_argument('--random_seed', type=int, default=23,help='随机种子，用于确保结果可重现')
 parser.add_argument('--max_optimization_iterations', type=int, default=10,help='最大优化迭代次数')
 parser.add_argument('--ansatz_reps', type=int, default=1,help='变分量子线路的重复层数')
+
+# 蛋白质序列参数
 parser.add_argument('--main_chain', default='APRLRFY',help='蛋白质主链氨基酸序列')
+
 # 约束惩罚参数
 parser.add_argument('--penalty_back', type=float, default=10,help='几何约束惩罚系数')
 parser.add_argument('--penalty_chiral', type=float, default=10,help='手性约束惩罚系数')
 parser.add_argument('--penalty_local_overlap', type=float, default=10,help='局部重叠惩罚系数')
+
 # CVaR优化参数
 parser.add_argument('--alpha', type=float, default=0.1,help='CVaR参数: 选择最低能量的alpha比例样本')
+
 # 采样参数
 parser.add_argument('--shots', type=int, default=100,help='量子测量采样次数')
 parser.add_argument('--max_results', type=int, default=1,help='每次迭代的结果数量')
+
 # AWS配置
 parser.add_argument('--aws_region', default=None,help='AWS区域设置（可选）')
 
@@ -172,13 +180,13 @@ def main():
     
     # 调用CVaR优化器
     res, convergence_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history = QuantumOptimizer.create_sampler_optimizer(
-        transpiled_circuit, qubit_op, backend, args
+        transpiled_circuit, qubit_op, backend, args, result_dir, problem
     )
     
     # =============================================================================
     # 3.7 收集收敛数据
     # =============================================================================
-    all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history, 'cumulative_shots': cumulative_shots_history.copy(), 'iteration_shots': iteration_shots_history, 'label': 'CVaR Energy', 'linestyle': '--'})
+    all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history, 'cumulative_shots': cumulative_shots_history.copy(), 'iteration_shots': iteration_shots_history, 'label': 'CVaR Energy'})
     
     # 收集每个迭代的前N个最优能量结果
     if all_top_energies:
@@ -190,7 +198,7 @@ def main():
                 if energy is not None:
                     valid_counts.append(j)
                     valid_energies.append(energy)
-            all_conv_data.append({'counts': valid_counts, 'values': valid_energies, 'cumulative_shots': cumulative_shots_history[:len(valid_counts)], 'iteration_shots': iteration_shots_history[:len(valid_counts)], 'label': f'Top {i+1} Energy', 'linestyle': '-'})
+            all_conv_data.append({'counts': valid_counts, 'values': valid_energies, 'cumulative_shots': cumulative_shots_history[:len(valid_counts)], 'iteration_shots': iteration_shots_history[:len(valid_counts)], 'label': f'Top {i+1} Energy'})
 
     # =============================================================================
     # 3.8 结果解析与保存
@@ -225,7 +233,8 @@ def main():
             "top_energies": [float(e) for e in iter_data.get("top_energies", [])],
             "top_results": processed_top_results,
             "total_counts": iter_data.get("total_counts", 0),
-            "actual_shots": iter_data.get("actual_shots", 0)
+            "actual_shots": iter_data.get("actual_shots", 0),
+            "protein_structure": iter_data.get("protein_structure", {})  # 从迭代数据中直接获取蛋白质结构信息
         }
         processed_iteration_results.append(processed_iter)
     
@@ -317,14 +326,7 @@ def main():
     except Exception as e:
         print(f"⚠ 生成VQE优化摘要图时出错: {e}")
 
-    # 保存迭代结果JSON文件
-    try:
-        print(f"\n正在保存迭代结果...")
-        iteration_results_filename = os.path.join(result_dir, "iteration_results.json")
-        ResultManager.save_result(processed_iteration_results, iteration_results_filename)
-        print(f"✓ 迭代结果已保存到: {iteration_results_filename}")
-    except Exception as e:
-        print(f"⚠ 保存迭代结果时出错: {e}")
+
 
     # 生成VQE收敛曲线图（带shots信息）
     try:

@@ -327,6 +327,10 @@ def main():
     
     # 存储每次迭代的多个最优结果的能量值，用于生成收敛图
     all_top_energies = []
+    
+    # 创建迭代结果目录
+    iteration_result_dir = os.path.join(RESULT_DIR, "iter_all_results")
+    os.makedirs(iteration_result_dir, exist_ok=True)
 
     def objective_function(params):
         """
@@ -375,6 +379,43 @@ def main():
             print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}, 实际shots = {actual_shots}")
             print(f"    各最优结果能量: {[round(e, 4) for e in top_energies]}")
         
+        # 为最优结果之一生成蛋白质结构信息（仅用于迭代信息）
+        protein_structure_info = {}
+        if top_results:
+            # 使用能量最低的结果来生成蛋白质结构
+            best_bitstring, best_energy, best_count = top_results[0]
+            
+            # 创建模拟结果对象
+            class MockResult:
+                def __init__(self, bs, val, counts, total):
+                    # 设置最高概率比特串的振幅为1（理想情况）
+                    self.eigenstate = {bs: 1.0}
+                    # 设置优化得到的能量值
+                    self.eigenvalue = val
+                    # 提供完整的概率分布用于后续分析
+                    self.probabilities = {k[::-1]: v/total for k, v in counts.items()}
+            
+            # 创建模拟结果并解析为蛋白质结构
+            raw_res = MockResult(best_bitstring, best_energy, counts, actual_shots)
+            try:
+                result = problem.interpret(raw_res)
+                
+                # 获取XYZ坐标数据
+                xyz_data = result.protein_shape_file_gen.get_xyz_data()
+                
+                protein_structure_info = {
+                    "turn_sequence": result.turn_sequence if hasattr(result, 'turn_sequence') else "",
+                    "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None else [],
+                    "best_bitstring": best_bitstring
+                }
+            except Exception as e:
+                print(f"    ⚠ 迭代 {len(convergence_history)} 蛋白质结构解析失败: {e}")
+                protein_structure_info = {
+                    "turn_sequence": "",
+                    "xyz_coordinates": [],
+                    "best_bitstring": best_bitstring
+                }
+        
         # 保存所有结果用于后续分析
         iteration_data = {
             "iteration": len(convergence_history),
@@ -382,9 +423,28 @@ def main():
             "top_energies": top_energies,
             "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
             "total_counts": len(counts),
-            "actual_shots": actual_shots
+            "actual_shots": actual_shots,
+            "protein_structure": protein_structure_info
         }
         iteration_results.append(iteration_data)
+        
+        # 立即保存当前迭代的结果到单独的文件
+        iteration_result_path = os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json')
+        with open(iteration_result_path, 'w') as f:
+            # 处理top_results使其可JSON序列化
+            serializable_data = {
+                "iteration": iteration_data["iteration"],
+                "cvar_energy": iteration_data["cvar_energy"],
+                "top_energies": [float(e) for e in iteration_data["top_energies"]],
+                "top_results": [
+                    {"bitstring": r[0], "energy": float(r[1]), "count": r[2]}
+                    for r in iteration_data["top_results"]
+                ],
+                "total_counts": iteration_data["total_counts"],
+                "actual_shots": iteration_data["actual_shots"],
+                "protein_structure": iteration_data["protein_structure"]
+            }
+            json.dump(serializable_data, f, indent=2)
         
         return energy
 

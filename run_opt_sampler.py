@@ -170,15 +170,141 @@ def main():
     print(f"\n--- 实验 1/1 ---")
     np.random.seed(args.random_seed)
     
-    # 调用CVaR优化器
-    res, convergence_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history = QuantumOptimizer.create_sampler_optimizer(
-        transpiled_circuit, qubit_op, backend, args
-    )
+    convergence_history = []
+    cumulative_shots_history = []  # 记录累计shots数
+    iteration_shots_history = []  # 记录每次迭代的实际shots数
+    iteration_results = []  # 记录每次迭代的多个结果
     
-    # =============================================================================
-    # 3.7 收集收敛数据
-    # =============================================================================
-    all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history, 'cumulative_shots': cumulative_shots_history.copy(), 'iteration_shots': iteration_shots_history, 'label': 'CVaR Energy', 'linestyle': '--'})
+    # 存储每次迭代的多个最优结果的能量值，用于生成收敛图
+    all_top_energies = []
+    
+    # 创建迭代结果目录
+    iteration_result_dir = os.path.join(RESULT_DIR, "iter_all_results")
+    os.makedirs(iteration_result_dir, exist_ok=True)
+
+    def objective_function(params):
+        """
+        优化目标函数
+        该函数接受参数，执行量子电路，使用CVaR策略计算能量，并返回用于优化的值
+        
+        Args:
+            params: 变分参数数组
+            
+        Returns:
+            float: CVaR能量值（优化目标）
+        """
+        # 将参数绑定到量子电路
+        bound_circ = transpiled_circuit.assign_parameters(params)
+        
+        # 在选定的后端上执行量子电路
+        job = backend.run(bound_circ, shots=args.shots)
+        
+        # 获取量子测量结果
+        counts = job.result().get_counts()
+        
+        # 计算实际消耗的 shots 数
+        actual_shots = sum(counts.values())
+        
+        # 使用CVaR策略计算能量（与原始版本一致，更稳定）
+        energy = calculate_cvar_energy(counts, qubit_op, args.alpha)
+        
+        # 同时提取多个最优结果用于后续分析
+        top_results = extract_top_results(counts, qubit_op, args.max_results)
+        top_energies = [result[1] for result in top_results]
+        
+        # 记录收敛历史和shots数，用于分析优化过程
+        convergence_history.append(energy)
+        iteration_shots_history.append(actual_shots)  # 记录每次迭代的实际shots数
+        # 使用实际消耗的 shots 数进行累加
+        if cumulative_shots_history:
+            cumulative_shots_history.append(cumulative_shots_history[-1] + actual_shots)
+        else:
+            cumulative_shots_history.append(actual_shots)
+        
+        # 记录每次迭代的多个最优结果的能量值
+        all_top_energies.append(top_energies)
+        
+        # 每隔一次迭代打印一次进度（避免过多输出）
+        if len(convergence_history) % 2 == 0:
+            print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}, 实际shots = {actual_shots}")
+            print(f"    各最优结果能量: {[round(e, 4) for e in top_energies]}")
+        
+        # 为最优结果之一生成蛋白质结构信息（仅用于迭代信息）
+        protein_structure_info = {}
+        if top_results:
+            # 使用能量最低的结果来生成蛋白质结构
+            best_bitstring, best_energy, best_count = top_results[0]
+            
+            # 创建模拟结果对象
+            class MockResult:
+                def __init__(self, bs, val, counts, total):
+                    # 设置最高概率比特串的振幅为1（理想情况）
+                    self.eigenstate = {bs: 1.0}
+                    # 设置优化得到的能量值
+                    self.eigenvalue = val
+                    # 提供完整的概率分布用于后续分析
+                    self.probabilities = {k[::-1]: v/total for k, v in counts.items()}
+            
+            # 创建模拟结果并解析为蛋白质结构
+            raw_res = MockResult(best_bitstring, best_energy, counts, actual_shots)
+            try:
+                result = problem.interpret(raw_res)
+                
+                # 获取XYZ坐标数据
+                xyz_data = result.protein_shape_file_gen.get_xyz_data()
+                
+                protein_structure_info = {
+                    "turn_sequence": result.turn_sequence if hasattr(result, 'turn_sequence') else "",
+                    "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None else [],
+                    "best_bitstring": best_bitstring
+                }
+            except Exception as e:
+                print(f"    ⚠ 迭代 {len(convergence_history)} 蛋白质结构解析失败: {e}")
+                protein_structure_info = {
+                    "turn_sequence": "",
+                    "xyz_coordinates": [],
+                    "best_bitstring": best_bitstring
+                }
+        
+        # 保存所有结果用于后续分析
+        iteration_data = {
+            "iteration": len(convergence_history),
+            "cvar_energy": energy,
+            "top_energies": top_energies,
+            "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
+            "total_counts": len(counts),
+            "actual_shots": actual_shots,
+            "protein_structure": protein_structure_info
+        }
+        iteration_results.append(iteration_data)
+        
+        # 立即保存当前迭代的结果到单独的文件
+        iteration_result_path = os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json')
+        with open(iteration_result_path, 'w') as f:
+            # 处理top_results使其可JSON序列化
+            serializable_data = {
+                "iteration": iteration_data["iteration"],
+                "cvar_energy": iteration_data["cvar_energy"],
+                "top_energies": [float(e) for e in iteration_data["top_energies"]],
+                "top_results": [
+                    {"bitstring": r[0], "energy": float(r[1]), "count": r[2]}
+                    for r in iteration_data["top_results"]
+                ],
+                "total_counts": iteration_data["total_counts"],
+                "actual_shots": iteration_data["actual_shots"],
+                "protein_structure": iteration_data["protein_structure"]
+            }
+            json.dump(serializable_data, f, indent=2)
+        
+        return energy
+
+    # 开始优化 (使用 COBYLA)
+    initial_params = np.random.uniform(-np.pi, np.pi, ansatz.num_parameters)
+    res = minimize(objective_function, initial_params, method='COBYLA', 
+                   options={'maxiter': args.max_optimization_iterations})
+    
+    # 添加CVaR能量收敛曲线
+    all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history, 'cumulative_shots': cumulative_shots_history.copy(), 'label': 'CVaR Energy'})
     
     # 收集每个迭代的前N个最优能量结果
     if all_top_energies:

@@ -127,6 +127,8 @@ load_dotenv(ROOT_PROJECT_PATH / ".env")
 
 LOGS_DIRPATH: Path = ROOT_PROJECT_PATH / "output" / "logs"
 
+RESULTS_DATA_DIRPATH: Path = ROOT_PROJECT_PATH / "output" / "results"
+
 MJ_INTERACTION_MATRIX_FILEPATH: Path = (
     ROOT_PROJECT_PATH / "src" / "resources" / "mj_matrix.txt"
 )
@@ -194,8 +196,6 @@ XYZ_FILE_LINE_START_INDEX: int = 2  # First two lines are header in .xyz files
 
 XYZ_FILE_PARTS_PER_LINE: int = 4  # Each line has symbol, x, y, z
 
-RESULTS_DATA_DIRPATH: Path = ROOT_PROJECT_PATH / "output" / "results"
-
 RAW_VQE_RESULTS_FILENAME: str = "raw_vqe_results.json"
 
 XYZ_FILENAME: str = "conformation.xyz"
@@ -232,10 +232,10 @@ SIDE_CHAIN_FIFTH_POSITION_INDEX: int = (
     4  # Index of the 5th bead in zero-indexed beads list
 )
 
-#BACKEND_TYPE: BackendType = BackendType.LOCAL_STATEVECTOR
+BACKEND_TYPE: BackendType = BackendType.LOCAL_STATEVECTOR
 #BACKEND_TYPE: BackendType = BackendType.IBM_QUANTUM
 #BACKEND_TYPE: BackendType = BackendType.AWS_SIM_QUANTUM
-BACKEND_TYPE: BackendType = BackendType.AWS_QC_QUANTUM
+#BACKEND_TYPE: BackendType = BackendType.AWS_QC_QUANTUM
 
 IBM_QUANTUM_TOKEN: str | None = os.environ.get("IBM_QUANTUM_TOKEN")
 

@@ -1,0 +1,188 @@
+"""从根目录运行量子蛋白质折叠工作流的主执行脚本。
+
+该脚本允许从量子项目根目录运行 qthesis-pf 蛋白质折叠模拟，
+并支持通过命令行参数进行配置。
+
+使用示例:
+    python run_qthesis.py
+    python run_qthesis.py --main_chain "APRLRFY" --backend local_statevector
+
+特性:
+    - 通过命令行参数配置
+    - 动态覆盖 constants 模块的配置
+    - 输出到根目录的 results 文件夹
+    - 无需修改原始 qthesis-pf 代码
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from qiskit_algorithms import SamplingMinimumEigensolverResult
+
+
+def setup_paths() -> None:
+    """为 qthesis-pf 项目设置 Python 导入路径。
+
+    该函数将 qthesis-pf/src 目录添加到 sys.path，允许
+    脚本从 qthesis-pf 包中导入模块。
+
+    Raises:
+        FileNotFoundError: 如果找不到 qthesis-pf 源代码目录。
+    """
+    root_dir = Path(__file__).parent
+    qthesis_src = root_dir / "qthesis-pf" / "src"
+    
+    if not qthesis_src.exists():
+        raise FileNotFoundError(
+            f"找不到 qthesis-pf 源代码目录: {qthesis_src}"
+        )
+    
+    sys.path.insert(0, str(qthesis_src))
+
+
+def parse_args() -> argparse.Namespace:
+    """解析命令行参数，使用 constants 中的默认值。
+
+    Returns:
+        argparse.Namespace: 解析后的命令行参数。
+
+    可用参数:
+        --main_chain: 主蛋白链序列 (默认: APRLRFY)
+        --side_chain: 侧链蛋白序列 (默认: '_' * len(main_chain))
+        --backend: 量子后端类型 (默认: local_statevector)
+        --interaction_type: 相互作用模型 MJ 或 HP (默认: MJ)
+        --shots: 硬件执行的测量次数 (默认: 100)
+        --output_dir: 结果输出目录 (默认: <root>/results)
+        --encoding: 构象编码类型 (默认: DENSE)
+    """
+    parser = argparse.ArgumentParser(description="运行量子蛋白质折叠模拟")
+    
+    parser.add_argument("--main_chain",type=str,default="APRLRFY",help="主蛋白链序列 (默认: APRLRFY)")
+    parser.add_argument("--side_chain",type=str,default=None,help="侧链蛋白序列 (默认: '_' * len(main_chain))")
+    parser.add_argument("--backend",type=str,choices=["local_statevector", "ibm_quantum", "aws_sim_quantum", "aws_qc_quantum"],default="local_statevector",help="量子后端类型 (默认: local_statevector)")
+    parser.add_argument("--interaction_type",type=str,choices=["MJ", "HP"],default="MJ",help="相互作用模型: MJ (Miyazawa-Jernigan) 或 HP (疏水-极性) (默认: MJ)")
+    parser.add_argument("--shots",type=int,default=100,help="硬件执行的测量次数 (默认: 100)")
+    parser.add_argument("--output_dir",type=str,default=None,help="结果输出目录 (默认: <root>/results)")
+    parser.add_argument("--encoding",type=str,choices=["DENSE", "SPARSE"],default="DENSE",help="构象编码类型 (默认: DENSE)")
+    
+    return parser.parse_args()
+
+
+def apply_config(args: argparse.Namespace) -> None:
+    """将命令行参数的配置应用到 constants 模块。"""
+    from enums import BackendType, ConformationEncoding, InteractionType
+    
+    backend_map = {
+        "local_statevector": BackendType.LOCAL_STATEVECTOR,
+        "ibm_quantum": BackendType.IBM_QUANTUM,
+        "aws_sim_quantum": BackendType.AWS_SIM_QUANTUM,
+        "aws_qc_quantum": BackendType.AWS_QC_QUANTUM,
+    }
+    
+    encoding_map = {
+        "DENSE": ConformationEncoding.DENSE,
+        "SPARSE": ConformationEncoding.SPARSE,
+    }
+    
+    interaction_map = {
+        "MJ": InteractionType.MJ,
+        "HP": InteractionType.HP,
+    }
+    
+    import constants
+    
+    constants.BACKEND_TYPE = backend_map[args.backend]
+    constants.CONFORMATION_ENCODING = encoding_map[args.encoding]
+    constants.INTERACTION_TYPE = interaction_map[args.interaction_type]
+    constants.IBM_QUANTUM_SHOTS = args.shots
+    
+    if args.output_dir:
+        output_path = Path(args.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        constants.RESULTS_DATA_DIRPATH = output_path
+    else:
+        root_dir = Path(__file__).parent
+        constants.RESULTS_DATA_DIRPATH = root_dir / "results"
+
+
+def main() -> None:
+    """执行完整的量子蛋白质折叠工作流。
+
+    工作流程步骤:
+        1. 解析命令行参数
+        2. 设置导入路径
+        3. 应用配置覆盖
+        4. 初始化日志记录器
+        5. 设置蛋白质折叠系统
+        6. 构建并压缩哈密顿量
+        7. 设置并运行 VQE 优化
+        8. 分析和可视化结果
+
+    Note:
+        必须在导入其他模块之前应用配置，以确保
+        覆盖后的值在整个模拟过程中被使用。
+    """
+    args = parse_args()
+    setup_paths()
+    apply_config(args)
+    
+    from constants import EMPTY_SIDECHAIN_PLACEHOLDER
+    from logger import get_logger
+    from utils.setup_utils import (
+        build_and_compress_hamiltonian,
+        run_vqe_optimization,
+        setup_folding_system,
+        setup_result_analysis,
+        setup_vqe_optimization,
+    )
+    
+    logger = get_logger()
+    
+    main_chain: str = args.main_chain
+    side_chain: str = args.side_chain if args.side_chain else EMPTY_SIDECHAIN_PLACEHOLDER * len(main_chain)
+    
+    logger.info("Starting quantum protein folding simulation")
+    logger.info("Main chain: %s", main_chain)
+    logger.info("Side chain: %s", side_chain)
+    logger.info("Backend: %s", args.backend)
+    logger.info("Interaction type: %s", args.interaction_type)
+    
+    protein, interaction, contact_map, distance_map = setup_folding_system(
+        main_chain=main_chain, side_chain=side_chain
+    )
+
+    _, compressed_h = build_and_compress_hamiltonian(
+        protein=protein,
+        interaction=interaction,
+        contact_map=contact_map,
+        distance_map=distance_map,
+    )
+
+    vqe, counts, values = setup_vqe_optimization(num_qubits=compressed_h.num_qubits)
+
+    raw_results: SamplingMinimumEigensolverResult = run_vqe_optimization(
+        vqe=vqe, hamiltonian=compressed_h
+    )
+
+    result_interpreter, result_visualizer = setup_result_analysis(
+        raw_results=raw_results,
+        protein=protein,
+        vqe_iterations=counts,
+        vqe_energies=values,
+    )
+
+    result_interpreter.dump_results_to_files()
+
+    result_visualizer.visualize_3d()
+    result_visualizer.visualize_2d()
+    result_visualizer.generate_3d_gif()
+    
+    logger.info("Simulation completed successfully")
+
+
+if __name__ == "__main__":
+    main()

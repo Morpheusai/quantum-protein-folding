@@ -65,10 +65,12 @@ def _get_aws_sim_quantum_sampler() -> tuple[BaseSamplerV2, BackendV2]:
         tuple[BaseSamplerV2, BackendV2]: Remote sampler instance and backend instance.
 
     """
-    from qiskit_braket_provider import BraketProvider, BraketSampler
+    from qiskit_braket_provider import BraketProvider
+    from qiskit.primitives import BackendSamplerV2
+
     provider = BraketProvider()
     backend = provider.get_backend('SV1')
-    aws_sv1_sampler = BraketSampler(backend=backend)
+    aws_sv1_sampler = BackendSamplerV2(backend=backend)
     aws_sv1_sampler.options.default_shots = IBM_QUANTUM_SHOTS
 
     sampler = TranspilingSampler(sampler=aws_sv1_sampler, backend=backend)
@@ -85,10 +87,12 @@ def _get_aws_qc_quantum_sampler() -> tuple[BaseSamplerV2, BackendV2]:
         tuple[BaseSamplerV2, BackendV2]: Remote sampler instance and backend instance.
 
     """
-    from qiskit_braket_provider import BraketProvider, BraketSampler
-    provider = BraketProvider()                                                                                                                                     
+    from qiskit_braket_provider import BraketProvider
+    from qiskit.primitives import BackendSamplerV2
+
+    provider = BraketProvider()
     backend = provider.get_backend('Garnet')
-    aws_garnet_sampler = BraketSampler(backend=backend)
+    aws_garnet_sampler = BackendSamplerV2(backend=backend)
 
     sampler = TranspilingSampler(sampler=aws_garnet_sampler, backend=backend)
 

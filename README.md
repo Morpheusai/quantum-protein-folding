@@ -8,13 +8,13 @@ conda activate duneq
 # Run
 ```
 # use default backend
-python run_protein_folding.py 
+python run_sampler.py 
 
 # use aws sv1 or pc
-python run_protein_folding.py --backend="aws"
+python run_estimator.py --backend="aws"
 
 # use ibm
-python run_protein_folding.py --backend="ibm"
+python run_sampler.py --backend="ibm"
 
 
 #get top result (default=1)
@@ -87,4 +87,42 @@ python structure2pic.py --input results/example.xyz
    修改文件：QuPepFold/qupepfold/qupepfold.py
    添加AWS真机代码：read_cli_inputs -> backend_mode
    运行环境：同1，当前可以成功运行
+   
+##########################################
+## 1. quantum-protein-folding##
+## from github:https://github.com/qiskit-community/quantum-protein-folding
+## from aritcle:https://www.nature.com/articles/s41534-021-00368-4
+## run_opt.py，run_estimator.py   -- based on estimator(Difference: The former is runnable code, while the latter places some class libraries in the lib.)
+## run_opt_sampler.py,run_samper.py -- based on sampler(Difference: The former is runnable code, while the latter places some class libraries in the lib.)
+python run_sampler.py --max_result=5
+python run_opt_sampler --backend=aws_sv1
+#############################################################################
+
+## 2.qthesis-pf ##
+## from github:https://github.com/QFold-Thesis/quantum-protein-folding
+## run_qthesis.py
+python run_qthesis.py --main_chain APRLRFY --backend aws_sv1
+
+#############################################################################
+## 3.stfc-qf ##
+## from github:https://github.com/stfc/quantum-protein-folding.git
+## from article: Quantum Algorithm for Protein Side-Chain Optimisation: Comparing Quantum to Classical Methods
+## run_stfc_qf.py
+# 精确计算
+    python run_stfc_qf.py -res 2 -rot 2 -m exact
+    
+    # 模拟退火
+    python run_stfc_qf.py -res 2 -rot 2 -m sa
+    
+    # QAOA（量子）- 本地模拟器
+    python run_stfc_qf.py -res 2 -rot 2 -m qaoa -p 1 -s 100
+    
+    # QAOA（量子）- AWS 后端
+    python run_stfc_qf.py -res 2 -rot 2 -m qaoa -p 1 -s 100 --backend aws_sv1
+#############################################################################
+## 4.QuPepFold ##
+## from github:https://github.com/qiskit-community/qupepfold
+## run_qupepfold.py
+python run_qupepfold.py --backend aws_sv1  --seq APRLRFY
+
 ``` 

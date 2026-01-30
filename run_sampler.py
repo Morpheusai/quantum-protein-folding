@@ -40,15 +40,12 @@ from qiskit.circuit.library import RealAmplitudes
 from scipy.optimize import minimize
 
 # 导入自定义模块
-from lib.job_metadata_logger import JobMetadataLogger
 from lib.quantum_backend_manager import QuantumBackendManager
 from lib.energy_calculator import EnergyCalculator
 from lib.protein_folding_builder import ProteinFoldingBuilder
-from lib.result_manager import ResultManager
-from lib.detailed_pdb_generator import convert_xyz_to_detailed_pdb
-from lib.mock_quantum_result import MockQuantumResult
-from lib.quantum_optimizer import QuantumOptimizer
-from lib.protein_folding_visualizer import ProteinFoldingVisualizer
+from lib.result_handler import ResultHandler
+from lib.quantum_optimizer import QuantumOptimizer, MockQuantumResult
+from lib.job_metadata_logger import JobMetadataLogger
 
 # =============================================================================
 # 2. 命令行参数配置
@@ -167,7 +164,7 @@ def main():
     # =============================================================================
     # 3.5 创建结果目录
     # =============================================================================
-    result_dir = ResultManager.create_result_directory("results", args.backend, mode='sampler')
+    result_dir = ResultHandler.create_result_directory("results", args.backend, mode='sampler')
     print(f"  - 结果目录: {result_dir}")
     
     all_conv_data = []
@@ -262,7 +259,7 @@ def main():
             energy_str = f"{abs(energy_value):.4f}"
             
             # 保存JSON结果文件
-            result_filename = os.path.join(result_dir, f"result_rank_{idx+1}_exp_1_energy_{energy_str}.json")
+            result_filename = os.path.join(result_dir, f"result_rank_{idx+1}_energy_{energy_str}.json")
             result_dict = {
                 "rank": idx + 1,
                 "original_experiment": 1,
@@ -289,21 +286,21 @@ def main():
                 "iteration_results": processed_iteration_results,
                 "xyz_coordinates": xyz_coords
             }
-            ResultManager.save_result(result_dict, result_filename)
+            ResultHandler.save_result(result_dict, result_filename)
             print(f"    - 结果已保存到: {result_filename}")
             
             # 生成PDB文件
             try:
-                pdb_filename = os.path.join(result_dir, f"structure_rank_{idx+1}_exp_1_energy_{energy_str}.pdb")
-                convert_xyz_to_detailed_pdb(result.protein_shape_file_gen.get_xyz_data(), pdb_filename)
+                pdb_filename = os.path.join(result_dir, f"structure_rank_{idx+1}_energy_{energy_str}.pdb")
+                ResultHandler.convert_xyz_to_detailed_pdb(result.protein_shape_file_gen.get_xyz_data(), pdb_filename)
                 print(f"    - PDB文件已保存到: {pdb_filename}")
             except Exception as e:
                 print(f"    - PDB文件生成失败: {e}")
             
             # 生成蛋白质结构图
             try:
-                structure_plot_filename = os.path.join(result_dir, f"structure_rank_{idx+1}_exp_1_energy_{energy_str}.png")
-                ProteinFoldingVisualizer.plot_protein_structure_3d(result, structure_plot_filename, 
+                structure_plot_filename = os.path.join(result_dir, f"structure_rank_{idx+1}_energy_{energy_str}.png")
+                ResultHandler.plot_protein_structure_3d(result, structure_plot_filename, 
                                                               title=f"Result {idx+1} (E={energy_value:.4f})")
                 print(f"    - 结构图已保存到: {structure_plot_filename}")
             except Exception as e:
@@ -321,7 +318,7 @@ def main():
     try:
         print(f"\n正在生成VQE优化过程摘要图...")
         optimization_summary_filename = os.path.join(result_dir, "vqe_optimization_summary.png")
-        ProteinFoldingVisualizer.plot_vqe_optimization_summary(all_conv_data, optimization_summary_filename, args.main_chain)
+        ResultHandler.plot_vqe_optimization_summary(all_conv_data, optimization_summary_filename, args.main_chain)
         print(f"✓ VQE优化摘要图已保存到: {optimization_summary_filename}")
     except Exception as e:
         print(f"⚠ 生成VQE优化摘要图时出错: {e}")
@@ -335,7 +332,7 @@ def main():
         iteration_shots = []
         for iter_data in processed_iteration_results:
             iteration_shots.append(iter_data.get("actual_shots", 0))
-        ProteinFoldingVisualizer.plot_vqe_convergence_with_shots(all_conv_data, iteration_shots, 
+        ResultHandler.plot_vqe_convergence_with_shots(all_conv_data, iteration_shots, 
                                                               convergence_with_shots_filename, args.main_chain)
         print(f"✓ VQE收敛曲线图已保存到: {convergence_with_shots_filename}")
     except Exception as e:

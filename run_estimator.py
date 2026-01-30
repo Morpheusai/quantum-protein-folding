@@ -43,13 +43,11 @@ from qiskit.primitives import BackendSamplerV2
 from qiskit import transpile
 
 # 导入自定义模块
-from lib.job_metadata_logger import JobMetadataLogger
 from lib.quantum_backend_manager import QuantumBackendManager
 from lib.protein_folding_builder import ProteinFoldingBuilder
-from lib.result_manager import ResultManager
-from lib.detailed_pdb_generator import convert_xyz_to_detailed_pdb
+from lib.result_handler import ResultHandler
 from lib.quantum_optimizer import QuantumOptimizer
-from lib.protein_folding_visualizer import ProteinFoldingVisualizer
+from lib.job_metadata_logger import JobMetadataLogger
 
 # =============================================================================
 # 命令行参数配置
@@ -69,9 +67,6 @@ parser.add_argument('--max_results', type=int, default=1, help='最大结果数�
 parser.add_argument('--aws_region', default=None, help='AWS区域')
 args = parser.parse_args()
 
-# 初始化作业元数据记录器
-metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
-
 
 def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
     """
@@ -88,6 +83,10 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
         tuple: (VQE结果, 收敛数据字典)
     """
     return QuantumOptimizer.create_vqe_optimizer(qubit_op, ansatz, optimizer, estimator, backend, args)
+
+
+# 初始化作业元数据记录器
+metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
 
 
 @metadata_logger
@@ -157,7 +156,7 @@ def main():
     # =========================================================================
     # 6. 创建结果目录
     # =========================================================================
-    result_dir = ResultManager.create_result_directory("results", args.backend, mode='estimator')
+    result_dir = ResultHandler.create_result_directory("results", args.backend, mode='estimator')
     print(f"  - 结果目录: {result_dir}")
 
     all_conv_data = []
@@ -258,13 +257,13 @@ def main():
             },
             "xyz_coordinates": xyz_coords
         }
-        ResultManager.save_result(result_dict, result_filename)
+        ResultHandler.save_result(result_dict, result_filename)
         print(f"    - 结果已保存到: {result_filename}")
         
         # 8.3 生成PDB文件
         try:
             pdb_filename = os.path.join(result_dir, f"structure_{i+1}_energy_{energy_str}.pdb")
-            convert_xyz_to_detailed_pdb(result.protein_shape_file_gen.get_xyz_data(), pdb_filename)
+            ResultHandler.convert_xyz_to_detailed_pdb(result.protein_shape_file_gen.get_xyz_data(), pdb_filename)
             print(f"    - PDB文件已保存到: {pdb_filename}")
         except Exception as e:
             print(f"    - PDB文件生成失败: {e}")
@@ -272,7 +271,7 @@ def main():
         # 8.4 生成蛋白质结构图
         try:
             structure_plot_filename = os.path.join(result_dir, f"structure_{i+1}_energy_{energy_str}.png")
-            ProteinFoldingVisualizer.plot_protein_structure_3d(result, structure_plot_filename, 
+            ResultHandler.plot_protein_structure_3d(result, structure_plot_filename, 
                                                               title=f"Result {i+1} (E={energy_value:.4f})")
             print(f"    - 结构图已保存到: {structure_plot_filename}")
         except Exception as e:
@@ -286,7 +285,7 @@ def main():
     try:
         print(f"\n正在生成VQE优化过程摘要图...")
         optimization_summary_filename = os.path.join(result_dir, "vqe_optimization_summary.png")
-        ProteinFoldingVisualizer.plot_vqe_optimization_summary(all_conv_data, optimization_summary_filename, args.main_chain)
+        ResultHandler.plot_vqe_optimization_summary(all_conv_data, optimization_summary_filename, args.main_chain)
         print(f"✓ VQE优化摘要图已保存到: {optimization_summary_filename}")
     except Exception as e:
         print(f"⚠ 生成VQE优化摘要图时出错: {e}")
@@ -299,7 +298,7 @@ def main():
         iteration_shots = []
         if all_conv_data and 'iteration_shots' in all_conv_data[0]:
             iteration_shots = all_conv_data[0]['iteration_shots']
-        ProteinFoldingVisualizer.plot_vqe_convergence_with_shots(all_conv_data, iteration_shots, 
+        ResultHandler.plot_vqe_convergence_with_shots(all_conv_data, iteration_shots, 
                                                               convergence_with_shots_filename, args.main_chain)
         print(f"✓ VQE收敛曲线图已保存到: {convergence_with_shots_filename}")
     except Exception as e:

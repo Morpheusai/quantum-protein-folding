@@ -13,7 +13,7 @@ import os
 from typing import Union, List, Optional
 import numpy as np
 from ..peptide.peptide import Peptide
-from lib.detailed_pdb_generator import DetailedPDBGenerator
+from .detailed_pdb_generator import DetailedPDBGenerator
 
 
 class ProteinShapeFileGen:

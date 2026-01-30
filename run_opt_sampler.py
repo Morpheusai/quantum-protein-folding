@@ -54,7 +54,7 @@ parser.add_argument('--main_chain', default='APRLRFY', help='蛋白质主链氨�
 parser.add_argument('--penalty_back', type=float, default=10, help='几何约束惩罚系数')
 parser.add_argument('--penalty_chiral', type=float, default=10, help='手性约束惩罚系数')
 parser.add_argument('--penalty_local_overlap', type=float, default=10, help='局部重叠惩罚系数')
-parser.add_argument('--alpha', type=float, default=0.1, help='CVaR参数: 选择最低能量的alpha比例样本')
+parser.add_argument('--alpha', type=float, default=0.25, help='CVaR参数: 选择最低能量的alpha比例样本')
 parser.add_argument('--shots', type=int, default=100, help='量子测量采样次数')
 parser.add_argument('--max_results', type=int, default=1, help='每次迭代的结果数量')
 parser.add_argument('--aws_region', default=None, help='AWS区域设置（可选）')
@@ -191,7 +191,8 @@ def estimate_energy_from_bitstring(bitstring, qubit_op):
                 # Z算子在|1>态下贡献-1，在|0>态下贡献+1
                 val *= -1.0
             elif char == 'X' or char == 'Y':
-                # X,Y算子在计算能量时会引入非对角项，此处简化处理为0
+                # X,Y算符在计算基态下的期望值为0，这是正确的处理
+                # 因为计算基态是Z算符的本征态，X/Y算符的期望值确实为0
                 val = 0.0 
                 break
         energy += coeff.real * val
@@ -211,19 +212,17 @@ def calculate_cvar_energy(counts, qubit_op, alpha):
         float: CVaR能量值（最低alpha比例样本的平均能量）
     """
     energies = []
-    total_shots = sum(counts.values())
     
-    # 计算每个测量结果对应的能量
+    # 计算每个比特串的能量（不按出现次数复制，避免对采样结果加权）
     for bitstring, count in counts.items():
         e = estimate_energy_from_bitstring(bitstring, qubit_op)
-        # 按照测量次数复制能量值
-        energies.extend([e] * count)
+        energies.append(e)
     
     # 按能量值升序排列
     energies.sort()
     
-    # 计算需要保留的样本数量（最低能量的alpha比例）
-    num_keep = max(1, int(total_shots * alpha))
+    # 计算需要保留的样本数量（基于不同比特串的数量，而不是总shots）
+    num_keep = max(1, int(len(energies) * alpha))
     
     # 返回最低能量样本的平均值
     return np.mean(energies[:num_keep])

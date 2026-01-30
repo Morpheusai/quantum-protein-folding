@@ -43,17 +43,24 @@ IBM后端：
 """
 
 import os
+import sys
+
+# 尝试导入AerSimulator（可选）
 try:
-    # Qiskit 2.x版本
-    from qiskit_aer import Aer
+    from qiskit_aer import AerSimulator
+    has_aer = True
 except ImportError:
-    try:
-        # Qiskit 1.x版本
-        from qiskit.providers.aer import Aer
-    except ImportError:
-        # 旧版本Qiskit
-        from qiskit import Aer
-from qiskit_ibm_runtime import QiskitRuntimeService
+    has_aer = False
+
+# 导入BasicSimulator（必选，Qiskit 2.x中自带）
+from qiskit.providers.basic_provider import BasicSimulator
+
+# 检查是否安装了qiskit_ibm_runtime
+try:
+    from qiskit_ibm_runtime import QiskitRuntimeService
+    has_ibm = True
+except ImportError:
+    has_ibm = False
 
 
 class QuantumBackendManager:
@@ -66,7 +73,7 @@ class QuantumBackendManager:
         
         Args:
             backend_name (str): 后端名称，支持以下选项：
-                - 'local': 本地模拟器（优先使用AerSimulator）
+                - 'local': 本地模拟器（使用AerSimulator）
                 - 'local_aer': 强制使用AerSimulator
                 - 'aws_sv1': AWS SV1模拟器
                 - 'aws_garnet': AWS Garnet量子芯片
@@ -95,31 +102,29 @@ class QuantumBackendManager:
         """
         backend_info = {}
         
-        if backend_name.lower() == 'local':
+        if backend_name.lower() == 'local' or backend_name.lower() == 'local_aer':
             # 本地Aer模拟器
             try:
-                backend = Aer.get_backend('aer_simulator')
-                backend.set_options(shots=shots)
-                backend_info['backend'] = backend
-                backend_info['type'] = 'local'
-                backend_info['name'] = 'AerSimulator'
+                if has_aer:
+                    backend = AerSimulator()
+                    backend.set_options(shots=shots)
+                    backend_info['backend'] = backend
+                    backend_info['type'] = 'local'
+                    backend_info['name'] = 'AerSimulator'
+                else:
+                    # 没有安装qiskit_aer，使用BasicSimulator
+                    backend = BasicSimulator()
+                    backend_info['backend'] = backend
+                    backend_info['type'] = 'local'
+                    backend_info['name'] = 'BasicSimulator'
             except Exception as e:
                 print(f"警告: 无法加载AerSimulator，使用基础模拟器: {e}")
                 # 备用模拟器
-                from qiskit import BasicAer
-                backend = BasicAer.get_backend('qasm_simulator')
+                backend = BasicSimulator()
                 backend_info['backend'] = backend
                 backend_info['type'] = 'local'
-                backend_info['name'] = 'BasicAer'
+                backend_info['name'] = 'BasicSimulator'
                 
-        elif backend_name.lower() == 'local_aer':
-            # 强制使用Aer模拟器
-            backend = Aer.get_backend('aer_simulator')
-            backend.set_options(shots=shots)
-            backend_info['backend'] = backend
-            backend_info['type'] = 'local'
-            backend_info['name'] = 'AerSimulator'
-            
         elif backend_name.lower().startswith('aws'):
             # AWS Braket后端
             backend_info = QuantumBackendManager._setup_aws_backend(backend_name, aws_region, shots)
@@ -136,13 +141,9 @@ class QuantumBackendManager:
             try:
                 from qiskit.primitives import StatevectorEstimator
                 backend_info['estimator'] = StatevectorEstimator()
-            except ImportError:
-                try:
-                    from qiskit.primitives import Estimator
-                    backend_info['estimator'] = Estimator(backend=backend_info['backend'])
-                except Exception as e:
-                    print(f"警告: 无法创建Estimator: {e}")
-                    backend_info['estimator'] = None
+            except Exception as e:
+                print(f"警告: 无法创建Estimator: {e}")
+                backend_info['estimator'] = None
         
         return backend_info
     
@@ -152,41 +153,64 @@ class QuantumBackendManager:
         backend_info = {}
         
         try:
-            from braket.aws import AwsDevice
-            from braket.circuits import Circuit
+            from qiskit_braket_provider import BraketProvider
+            
+            # 设置AWS区域
+            if region:
+                os.environ['AWS_DEFAULT_REGION'] = region
+            
+            provider = BraketProvider()
             
             # 根据后端名称选择设备
             if backend_name.lower() == 'aws_sv1':
-                device_arn = "arn:aws:braket:::device/quantum-simulator/amazon/sv1"
+                backend = provider.get_backend('SV1')
+                print(f"✓ AWS SV1 已连接")
             elif backend_name.lower() == 'aws_garnet':
-                device_arn = "arn:aws:braket:us-west-1::device/qpu/rigetti/Aspen-M-3"
+                backend = provider.get_backend('Garnet')
+                print(f"✓ AWS Garnet 已连接")
             elif backend_name.lower() == 'aws_ionq':
-                device_arn = "arn:aws:braket:us-east-1::device/qpu/ionq/ionQdevice"
+                backend = provider.get_backend('IonQ Device')
+                print(f"✓ AWS IonQ 已连接")
             elif backend_name.lower() == 'aws_forte':
-                device_arn = "arn:aws:braket:us-east-1::device/qpu/ionq/Forte-1"
+                backend = provider.get_backend('Forte 1')
+                print(f"✓ AWS IonQ Forte 已连接")
             else:
                 raise ValueError(f"不支持的AWS后端: {backend_name}")
             
-            device = AwsDevice(device_arn)
-            backend_info['backend'] = device
+            backend_info['backend'] = backend
             backend_info['type'] = 'aws'
             backend_info['name'] = backend_name
             backend_info['shots'] = shots
             
-        except ImportError:
-            print("警告: AWS Braket SDK未安装，使用本地模拟器替代")
-            try:
-                from qiskit_aer import Aer
-            except ImportError:
-                try:
-                    from qiskit.providers.aer import Aer
-                except ImportError:
-                    from qiskit import Aer
-            backend = Aer.get_backend('aer_simulator')
-            backend.set_options(shots=shots)
-            backend_info['backend'] = backend
-            backend_info['type'] = 'local'
-            backend_info['name'] = 'AerSimulator (AWS替代)'
+        except ImportError as e:
+            print(f"警告: Qiskit Braket Provider未安装，使用本地模拟器替代: {e}")
+            # 使用本地模拟器作为替代
+            if has_aer:
+                backend = AerSimulator()
+                backend.set_options(shots=shots)
+                backend_info['backend'] = backend
+                backend_info['type'] = 'local'
+                backend_info['name'] = 'AerSimulator (AWS替代)'
+            else:
+                backend = BasicSimulator()
+                backend_info['backend'] = backend
+                backend_info['type'] = 'local'
+                backend_info['name'] = 'BasicSimulator (AWS替代)'
+            
+        except Exception as e:
+            print(f"警告: AWS后端设置失败，使用本地模拟器替代: {e}")
+            # 使用本地模拟器作为替代
+            if has_aer:
+                backend = AerSimulator()
+                backend.set_options(shots=shots)
+                backend_info['backend'] = backend
+                backend_info['type'] = 'local'
+                backend_info['name'] = 'AerSimulator (AWS替代)'
+            else:
+                backend = BasicSimulator()
+                backend_info['backend'] = backend
+                backend_info['type'] = 'local'
+                backend_info['name'] = 'BasicSimulator (AWS替代)'
             
         return backend_info
     
@@ -196,21 +220,37 @@ class QuantumBackendManager:
         backend_info = {}
         
         try:
+            if not has_ibm:
+                print("警告: IBM Quantum Runtime未安装，使用本地模拟器替代")
+                # 使用本地模拟器作为替代
+                if has_aer:
+                    backend = AerSimulator()
+                    backend.set_options(shots=shots)
+                    backend_info['backend'] = backend
+                    backend_info['type'] = 'local'
+                    backend_info['name'] = 'AerSimulator (IBM替代)'
+                else:
+                    backend = BasicSimulator()
+                    backend_info['backend'] = backend
+                    backend_info['type'] = 'local'
+                    backend_info['name'] = 'BasicSimulator (IBM替代)'
+                return backend_info
+            
             # 检查IBM Quantum凭据
             if not os.environ.get('QISKIT_IBM_TOKEN'):
                 print("警告: IBM Quantum凭据未设置，使用本地模拟器替代")
-                try:
-                    from qiskit_aer import Aer
-                except ImportError:
-                    try:
-                        from qiskit.providers.aer import Aer
-                    except ImportError:
-                        from qiskit import Aer
-                backend = Aer.get_backend('aer_simulator')
-                backend.set_options(shots=shots)
-                backend_info['backend'] = backend
-                backend_info['type'] = 'local'
-                backend_info['name'] = 'AerSimulator (IBM替代)'
+                # 使用本地模拟器作为替代
+                if has_aer:
+                    backend = AerSimulator()
+                    backend.set_options(shots=shots)
+                    backend_info['backend'] = backend
+                    backend_info['type'] = 'local'
+                    backend_info['name'] = 'AerSimulator (IBM替代)'
+                else:
+                    backend = BasicSimulator()
+                    backend_info['backend'] = backend
+                    backend_info['type'] = 'local'
+                    backend_info['name'] = 'BasicSimulator (IBM替代)'
                 return backend_info
             
             service = QiskitRuntimeService()
@@ -227,17 +267,17 @@ class QuantumBackendManager:
             
         except Exception as e:
             print(f"警告: IBM Quantum后端设置失败，使用本地模拟器替代: {e}")
-            try:
-                from qiskit_aer import Aer
-            except ImportError:
-                try:
-                    from qiskit.providers.aer import Aer
-                except ImportError:
-                    from qiskit import Aer
-            backend = Aer.get_backend('aer_simulator')
-            backend.set_options(shots=shots)
-            backend_info['backend'] = backend
-            backend_info['type'] = 'local'
-            backend_info['name'] = 'AerSimulator'
+            # 使用本地模拟器作为替代
+            if has_aer:
+                backend = AerSimulator()
+                backend.set_options(shots=shots)
+                backend_info['backend'] = backend
+                backend_info['type'] = 'local'
+                backend_info['name'] = 'AerSimulator'
+            else:
+                backend = BasicSimulator()
+                backend_info['backend'] = backend
+                backend_info['type'] = 'local'
+                backend_info['name'] = 'BasicSimulator'
             
         return backend_info

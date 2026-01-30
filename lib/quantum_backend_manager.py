@@ -1,325 +1,303 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-量子优化器模块
+量子后端管理器模块
+
+管理不同量子后端的配置和初始化，支持本地模拟器和云量子设备。
 
 主要类：
-- QuantumOptimizer: 量子优化器，提供VQE和Sampler优化方法
-- MockQuantumResult: 模拟量子结果类
+- QuantumBackendManager: 量子后端管理器类
+
+主要方法：
+- setup_backend(): 设置量子后端（local/aws/ibm）
+
+使用示例：
+    >>> from lib import QuantumBackendManager
+    >>> backend_info = QuantumBackendManager.setup_backend('local', shots=100)
+    >>> backend = backend_info['backend']
+
+依赖：
+- qiskit_aer: Qiskit Aer模拟器（可选）
+- qiskit_ibm_runtime: IBM Quantum运行时（可选）
+- qiskit_braket_provider: AWS Braket Provider（可选）
 """
 
-import copy
-from qiskit_algorithms import VQE
-from qiskit import transpile
-import numpy as np
-from scipy.optimize import minimize
 import os
-import json
+import sys
 import traceback
 
-from lib.energy_calculator import EnergyCalculator
+try:
+    from qiskit_aer import AerSimulator
+    has_aer = True
+except ImportError:
+    has_aer = False
+
+from qiskit.providers.basic_provider import BasicSimulator
+
+try:
+    from qiskit_ibm_runtime import QiskitRuntimeService
+    has_ibm = True
+except ImportError:
+    has_ibm = False
 
 
-class MockQuantumResult:
-    """模拟量子结果类"""
+class QuantumBackendManager:
+    """量子后端管理器类"""
     
-    def __init__(self, eigenstate, eigenvalue, counts, total_shots):
-        self.eigenstate = eigenstate
-        self.eigenvalue = eigenvalue
-        self.counts = counts
-        self.total_shots = total_shots
+    # AWS设备配置字典
+    AWS_BACKENDS = {
+        'aws_sv1': {'name': 'SV1', 'display': 'AWS SV1'},
+        'aws_garnet': {'name': 'Garnet', 'display': 'AWS Garnet'},
+        'aws_ionq': {'name': 'IonQ Device', 'display': 'AWS IonQ'},
+        'aws_forte': {'name': 'Forte 1', 'display': 'AWS IonQ Forte'},
+        'aws_aria': {'name': 'Aria 1', 'display': 'AWS IonQ Aria 1'},
+        'aws_tn1': {'name': 'TN1', 'display': 'AWS TN1'},
+        'aws_dm1': {'name': 'dm1', 'display': 'AWS dm1'},
+        'aws_ankaa': {'name': 'Ankaa-3', 'display': 'AWS Rigetti Ankaa-3'},
+        'aws_emerald': {'name': 'Emerald', 'display': 'AWS IQM Emerald'},
+        'aws_ibex': {'name': 'IBEX Q1', 'display': 'AWS AQT IBEX Q1'},
+    }
     
-    def get_eigenstate(self):
-        """获取本征态"""
-        return self.eigenstate
-    
-    def get_eigenvalue(self):
-        """获取本征值（能量）"""
-        return self.eigenvalue
-    
-    def get_counts(self):
-        """获取测量结果计数"""
-        return self.counts
-    
-    def get_total_shots(self):
-        """获取总采样次数"""
-        return self.total_shots
-    
-    def get_most_probable_state(self):
-        """获取最可能的状态"""
-        if not self.counts:
-            return self.eigenstate
-        
-        max_count = 0
-        most_probable = self.eigenstate
-        
-        for state, count in self.counts.items():
-            if count > max_count:
-                max_count = count
-                most_probable = state
-        
-        return most_probable
-    
-    def get_probability(self, state):
-        """获取特定状态的概率"""
-        if not self.counts or self.total_shots == 0:
-            return 0.0
-        
-        return self.counts.get(state, 0) / self.total_shots
-    
-    def __str__(self):
-        return f"MockQuantumResult(eigenstate={self.eigenstate}, eigenvalue={self.eigenvalue:.4f})"
-    
-    def __repr__(self):
-        return (f"MockQuantumResult(eigenstate='{self.eigenstate}', "
-                f"eigenvalue={self.eigenvalue:.4f}, "
-                f"total_shots={self.total_shots})")
-
-
-class QuantumOptimizer:
-    """量子优化器基类，提供统一的优化接口，支持VQE和Sampler两种模式"""
+    # 可用的AWS设备列表（用于错误提示）
+    AVAILABLE_AWS_BACKENDS = [
+        'aws_sv1 (模拟器，34量子比特)',
+        'aws_tn1 (模拟器，50量子比特)',
+        'aws_dm1 (模拟器，17量子比特)',
+        'aws_forte (IonQ Forte 1，36量子比特)',
+        'aws_aria (IonQ Aria 1，25量子比特)',
+        'aws_ankaa (Rigetti Ankaa-3，82量子比特)',
+        'aws_emerald (IQM Emerald，54量子比特)',
+        'aws_ibex (AQT IBEX Q1，1量子比特)',
+        'local (本地模拟器)',
+    ]
     
     @staticmethod
-    def create_vqe_optimizer(qubit_op, ansatz, optimizer, estimator, backend=None, args=None):
-        """
-        创建VQE优化器
-        
-        Args:
-            qubit_op: 量子比特哈密顿量算子
-            ansatz: 变分量子线路
-            optimizer: 优化器
-            estimator: 量子估算器
-            backend: 量子后端（可选）
-            args: 命令行参数对象（可选）
-            
-        Returns:
-            tuple: (VQE结果, 收敛数据字典)
-        """
-        working_ansatz = copy.deepcopy(ansatz)
-        working_ansatz.remove_final_measurements()
-
-        if backend is not None and args is not None:
-            working_ansatz = transpile(
-                working_ansatz, 
-                backend=backend,
-                initial_layout=list(range(working_ansatz.num_qubits)) 
-                    if args.backend not in ['local', 'aws_sv1', 'ibm_simulator'] else None,
-                optimization_level=3
-            )
-            print(f"   VQE电路转译: 逻辑比特数={working_ansatz.num_qubits}, 物理比特数={working_ansatz.width()}")
-
-        convergence = {'counts': [], 'values': [], 'cumulative_shots': [], 'iteration_shots': []}
-        actual_shots_list = []
-        
-        def record_shots_from_metadata(metadata):
-            """从元数据中提取实际执行的shots数"""
-            actual_shots = 0
-            if "shots_per_circuit" in metadata:
-                actual_shots = sum(metadata["shots_per_circuit"])
-            elif "execution" in metadata and "circuits" in metadata["execution"]:
-                actual_shots = sum(c["shots"] for c in metadata["execution"]["circuits"])
-            elif "shots" in metadata:
-                shots_per_circuit = metadata["shots"]
-                num_circuits = metadata.get("num_circuits", 1)
-                actual_shots = shots_per_circuit * num_circuits
-            return actual_shots
-        
-        def callback(eval_count, parameters, mean, std):
-            convergence['counts'].append(eval_count)
-            convergence['values'].append(mean)
-            
-            current_step_shots = args.shots if args else 100
-            actual_shots_list.append(current_step_shots)
-            convergence['iteration_shots'].append(current_step_shots)
-            
-            cumulative_shots = sum(actual_shots_list)
-            convergence['cumulative_shots'].append(cumulative_shots)
-
-        vqe = VQE(estimator=estimator, ansatz=working_ansatz, optimizer=optimizer, callback=callback)
-        result = vqe.compute_minimum_eigenvalue(qubit_op)
-        
-        if hasattr(result, 'metadata') and result.metadata:
-            total_shots_from_metadata = record_shots_from_metadata(result.metadata)
-            if total_shots_from_metadata > 0:
-                if len(convergence['cumulative_shots']) > 0:
-                    avg_shots_per_eval = max(1, total_shots_from_metadata // len(convergence['cumulative_shots']))
-                    convergence['cumulative_shots'] = [i * avg_shots_per_eval 
-                                                       for i in range(1, len(convergence['cumulative_shots']) + 1)]
-        
-        convergence['label'] = 'VQE Energy'
-        return result, convergence
+    def _get_local_backend(shots, suffix=''):
+        """获取本地模拟器作为回退方案"""
+        backend_info = {}
+        if has_aer:
+            backend = AerSimulator()
+            backend.set_options(shots=shots)
+            backend_info['backend'] = backend
+            backend_info['type'] = 'local'
+            backend_info['name'] = f'AerSimulator{suffix}'
+        else:
+            backend = BasicSimulator()
+            backend_info['backend'] = backend
+            backend_info['type'] = 'local'
+            backend_info['name'] = f'BasicSimulator{suffix}'
+        return backend_info
     
     @staticmethod
-    def create_sampler_optimizer(transpiled_circuit, qubit_op, backend, args, result_dir=None, problem=None):
+    def _print_error(title, reason, traceback_str=None, fallback=None):
+        """统一格式化输出错误信息"""
+        print("=" * 80)
+        print(f"错误: {title}")
+        print(f"原因: {reason}")
+        if traceback_str:
+            print(f"\n完整错误堆栈:")
+            print(traceback_str)
+        if fallback:
+            print("=" * 80)
+            print(f"回退方案: {fallback}")
+        print("=" * 80)
+    
+    @staticmethod
+    def _print_ionq_warning():
+        """打印IonQ设备警告信息"""
+        print(f"⚠ 注意: IonQ设备使用特殊的量子门集合 (gpi, gpi2, ms)")
+        print(f"  当前代码使用标准量子门，可能需要额外的电路转换")
+    
+    @staticmethod
+    def _print_available_aws_backends():
+        """打印可用的AWS设备列表"""
+        print(f"建议: 请使用其他可用的AWS设备，如:")
+        for backend in QuantumBackendManager.AVAILABLE_AWS_BACKENDS:
+            print(f"  - {backend}")
+        print(f"\n可以使用以下命令查看所有可用设备:")
+        print(f"  python aws_check.py")
+    
+    @staticmethod
+    def _check_device_status(backend):
+        """检查AWS设备状态"""
+        try:
+            device = backend._device
+            status = device.status if hasattr(device, 'status') else None
+            if status and status.value == 'OFFLINE':
+                print(f"警告: {backend.name} 设备当前处于OFFLINE状态")
+                QuantumBackendManager._print_available_aws_backends()
+                raise ValueError(f"设备 {backend.name} 当前不可用，状态: {status.value}")
+        except Exception as e:
+            pass
+    
+    @staticmethod
+    def setup_backend(backend_name, aws_region=None, shots=100, use_estimator=True):
         """
-        创建Sampler优化器
-        
+        设置量子后端
+
         Args:
-            transpiled_circuit: 转译后的量子电路
-            qubit_op: 量子比特哈密顿量算子
-            backend: 量子后端
-            args: 命令行参数对象
-            result_dir: 结果目录路径（用于保存迭代结果，可选）
-            problem: 蛋白质折叠问题对象（可选）
-            
+            backend_name (str): 后端名称，支持：
+                - local/local_aer: 本地模拟器
+                - aws_*: AWS Braket后端（如aws_sv1, aws_aria等）
+                - ibm/ibm_simulator: IBM Quantum后端
+            aws_region (str, optional): AWS区域设置
+            shots (int, optional): 量子采样次数，默认100
+            use_estimator (bool, optional): 是否使用Estimator模式，默认True
+
         Returns:
-            tuple: (优化结果, 收敛历史, 迭代结果列表, 所有top能量列表, 累积shots历史, 迭代shots历史)
+            dict: 包含后端信息的字典，键包括：
+                - 'backend': 量子后端对象
+                - 'type': 后端类型（'local', 'aws', 'ibm'）
+                - 'name': 后端名称
+                - 'estimator': Estimator实例（如果use_estimator=True）
+
+        Raises:
+            ValueError: 不支持的后端名称
+
+        Example:
+            >>> backend_info = QuantumBackendManager.setup_backend('local', shots=1000)
+            >>> print(backend_info['name'])
+            AerSimulator
         """
-        convergence_history = []
-        cumulative_shots_history = []
-        iteration_shots_history = []
-        iteration_results = []
-        all_top_energies = []
-
-        iteration_result_dir = None
-        if result_dir:
-            iteration_result_dir = os.path.join(result_dir, "iter_all_results")
-            os.makedirs(iteration_result_dir, exist_ok=True)
-
-        def objective_function(params):
-            """优化目标函数：执行量子电路，使用CVaR策略计算能量"""
+        backend_info = {}
+        
+        if backend_name.lower() in ('local', 'local_aer'):
+            backend_info = QuantumBackendManager._setup_local_backend(backend_name, shots)
+        elif backend_name.lower().startswith('aws'):
+            backend_info = QuantumBackendManager._setup_aws_backend(backend_name, aws_region, shots)
+        elif backend_name.lower().startswith('ibm'):
+            backend_info = QuantumBackendManager._setup_ibm_backend(backend_name, shots)
+        else:
+            raise ValueError(f"不支持的量子后端: {backend_name}")
+        
+        if use_estimator and 'backend' in backend_info:
             try:
-                bound_circ = transpiled_circuit.assign_parameters(params)
-                
-                job = backend.run(bound_circ, shots=args.shots)
-                
-                counts = job.result().get_counts()
-                
-                actual_shots = sum(counts.values())
-                
-                energy = EnergyCalculator.calculate_cvar_energy(counts, qubit_op, args.alpha)
-                
-                top_results = EnergyCalculator.extract_top_results(counts, qubit_op, args.max_results)
-                top_energies = [result[1] for result in top_results]
-                
-                convergence_history.append(energy)
-                iteration_shots_history.append(actual_shots)
-                
-                if cumulative_shots_history:
-                    cumulative_shots_history.append(cumulative_shots_history[-1] + actual_shots)
-                else:
-                    cumulative_shots_history.append(actual_shots)
-                
-                all_top_energies.append(top_energies)
-                
-                if len(convergence_history) % 2 == 0:
-                    print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}, 实际shots = {actual_shots}")
-                    print(f"    各最优结果能量: {[round(e, 4) for e in top_energies]}")
-            
-                iteration_data = {
-                    "iteration": len(convergence_history),
-                    "cvar_energy": energy,
-                    "top_energies": top_energies,
-                    "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
-                    "total_counts": len(counts),
-                    "actual_shots": actual_shots,
-                    "raw_counts": counts
-                }
-                iteration_results.append(iteration_data)
-                
-                if iteration_result_dir:
-                    protein_structure_info = {}
-                    top_results_for_struct = iteration_data.get("top_results", [])
-                    
-                    if problem and top_results_for_struct:
-                        best_bitstring, best_energy, best_count = top_results_for_struct[0]
-                        
-                        class MockResult:
-                            def __init__(self, bs, val, counts, total):
-                                self.eigenstate = {bs: 1.0}
-                                self.eigenvalue = val
-                                self.probabilities = {k[::-1]: v/total for k, v in counts.items()}
-                        
-                        raw_res = MockResult(best_bitstring, best_energy, counts, actual_shots)
-                        try:
-                            result = problem.interpret(raw_res)
-                            xyz_data = result.protein_shape_file_gen.get_xyz_data()
-                            
-                            protein_structure_info = {
-                                "turn_sequence": result.turn_sequence if hasattr(result, 'turn_sequence') else "",
-                                "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None else [],
-                                "best_bitstring": best_bitstring
-                            }
-                        except Exception as e:
-                            print(f"    ⚠ 迭代 {iteration_data['iteration']} 蛋白质结构解析失败: {e}")
-                            protein_structure_info = {
-                                "turn_sequence": "",
-                                "xyz_coordinates": [],
-                                "best_bitstring": best_bitstring
-                            }
-                    
-                    iteration_result_path = os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json')
-                    with open(iteration_result_path, 'w') as f:
-                        serializable_data = {
-                            "iteration": iteration_data["iteration"],
-                            "cvar_energy": iteration_data["cvar_energy"],
-                            "top_energies": [float(e) for e in iteration_data["top_energies"]],
-                            "total_counts": iteration_data["total_counts"],
-                            "actual_shots": iteration_data["actual_shots"],
-                            "protein_structure": protein_structure_info
-                        }
-                        json.dump(serializable_data, f, indent=2)
-                
-                return energy
-                
+                from qiskit.primitives import StatevectorEstimator
+                backend_info['estimator'] = StatevectorEstimator()
             except Exception as e:
-                error_msg = str(e)
-                print("=" * 80)
-                if "DeviceOfflineException" in error_msg or "OFFLINE" in error_msg:
-                    print(f"错误: AWS量子设备当前不可用（离线状态）")
-                    print(f"详细信息: {e}")
-                    print(f"\n完整错误堆栈:")
-                    print(traceback.format_exc())
-                    print("=" * 80)
-                    print(f"建议: 请使用其他可用的AWS设备，如:")
-                    print(f"  - aws_sv1 (模拟器，34量子比特)")
-                    print(f"  - aws_tn1 (模拟器，50量子比特)")
-                    print(f"  - aws_dm1 (模拟器，17量子比特)")
-                    print(f"  - aws_forte (IonQ Forte 1，36量子比特)")
-                    print(f"  - aws_aria (IonQ Aria 1，25量子比特)")
-                    print(f"  - aws_ankaa (Rigetti Ankaa-3，82量子比特)")
-                    print(f"  - aws_emerald (IQM Emerald，54量子比特)")
-                    print(f"  - aws_ibex (AQT IBEX Q1，1量子比特)")
-                    print(f"  - local (本地模拟器)")
-                    print(f"\n可以使用以下命令查看所有可用设备:")
-                    print(f"  python aws_check.py")
-                    print("=" * 80)
-                    raise ValueError(f"设备离线，请更换其他设备")
-                elif "Unable to translate the operations" in error_msg or ("gpi" in error_msg and "gpi2" in error_msg):
-                    print(f"错误: IonQ设备量子门转换失败")
-                    print(f"详细信息: {e}")
-                    print(f"\n完整错误堆栈:")
-                    print(traceback.format_exc())
-                    print("=" * 80)
-                    print(f"原因: IonQ设备使用特殊的量子门集合 (gpi, gpi2, ms)")
-                    print(f"      当前代码使用标准量子门 (H, CNOT, RZ, RX, RY等)")
-                    print(f"      Qiskit的transpile无法自动转换到IonQ的基集")
-                    print("=" * 80)
-                    print(f"解决方案:")
-                    print(f"  1. 使用AWS Braket SDK直接构建IonQ兼容的电路")
-                    print(f"  2. 添加自定义的量子门转换规则")
-                    print(f"  3. 使用其他支持标准量子门的AWS设备:")
-                    print(f"     - aws_sv1 (模拟器，34量子比特) ✓ 推荐")
-                    print(f"     - aws_tn1 (模拟器，50量子比特) ✓ 推荐")
-                    print(f"     - aws_dm1 (模拟器，17量子比特) ✓ 推荐")
-                    print(f"     - aws_ankaa (Rigetti Ankaa-3，82量子比特)")
-                    print(f"     - aws_emerald (IQM Emerald，54量子比特)")
-                    print(f"     - aws_ibex (AQT IBEX Q1，1量子比特)")
-                    print(f"     - local (本地模拟器) ✓ 免费，无网络延迟")
-                    print("=" * 80)
-                    raise ValueError(f"IonQ设备需要特殊的电路转换，请使用其他设备")
-                else:
-                    print(f"错误: 量子计算执行失败")
-                    print(f"原因: {e}")
-                    print(f"\n完整错误堆栈:")
-                    print(traceback.format_exc())
-                    print("=" * 80)
-                    raise
-            
-        print(f"\n正在开始优化 (使用 COBYLA)...")
-        num_parameters = transpiled_circuit.num_parameters
-        initial_params = np.random.uniform(-np.pi, np.pi, num_parameters)
-        res = minimize(objective_function, initial_params, method='COBYLA', 
-                       options={'maxiter': args.max_optimization_iterations})
+                print(f"警告: 无法创建Estimator: {e}")
+                backend_info['estimator'] = None
         
-        return res, convergence_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history
+        return backend_info
+    
+    @staticmethod
+    def _setup_local_backend(backend_name, shots):
+        """设置本地模拟器"""
+        backend_info = {}
+        try:
+            if has_aer:
+                backend = AerSimulator()
+                backend.set_options(shots=shots)
+                backend_info['backend'] = backend
+                backend_info['type'] = 'local'
+                backend_info['name'] = 'AerSimulator'
+            else:
+                backend = BasicSimulator()
+                backend_info['backend'] = backend
+                backend_info['type'] = 'local'
+                backend_info['name'] = 'BasicSimulator'
+        except Exception as e:
+            print(f"警告: 无法加载AerSimulator，使用基础模拟器: {e}")
+            backend = BasicSimulator()
+            backend_info['backend'] = backend
+            backend_info['type'] = 'local'
+            backend_info['name'] = 'BasicSimulator'
+        return backend_info
+    
+    @staticmethod
+    def _setup_aws_backend(backend_name, region, shots):
+        """设置AWS Braket后端"""
+        backend_info = {}
+        
+        try:
+            from qiskit_braket_provider import BraketProvider
+            
+            if region:
+                os.environ['AWS_DEFAULT_REGION'] = region
+            
+            provider = BraketProvider()
+            
+            backend_config = QuantumBackendManager.AWS_BACKENDS.get(backend_name.lower())
+            if not backend_config:
+                raise ValueError(f"不支持的AWS后端: {backend_name}")
+            
+            backend = provider.get_backend(backend_config['name'])
+            print(f"✓ {backend_config['display']} 已连接")
+            
+            QuantumBackendManager._check_device_status(backend)
+            
+            backend_info['backend'] = backend
+            backend_info['type'] = 'aws'
+            backend_info['name'] = backend_name
+            backend_info['shots'] = shots
+            
+        except ImportError as e:
+            QuantumBackendManager._print_error(
+                "无法加载AWS Braket Provider",
+                str(e),
+                traceback.format_exc(),
+                "使用本地模拟器替代"
+            )
+            backend_info = QuantumBackendManager._get_local_backend(shots, ' (AWS替代)')
+            
+        except Exception as e:
+            QuantumBackendManager._print_error(
+                "AWS后端设置失败",
+                str(e),
+                traceback.format_exc(),
+                "使用本地模拟器替代"
+            )
+            backend_info = QuantumBackendManager._get_local_backend(shots, ' (AWS替代)')
+            
+        return backend_info
+    
+    @staticmethod
+    def _setup_ibm_backend(backend_name, shots):
+        """设置IBM Quantum后端"""
+        backend_info = {}
+        
+        try:
+            if not has_ibm:
+                QuantumBackendManager._print_error(
+                    "IBM Quantum Runtime未安装",
+                    "qiskit_ibm_runtime包未找到",
+                    traceback.format_exc(),
+                    "使用本地模拟器替代"
+                )
+                return QuantumBackendManager._get_local_backend(shots, ' (IBM替代)')
+            
+            if not os.environ.get('QISKIT_IBM_TOKEN'):
+                print("=" * 80)
+                print(f"错误: IBM Quantum凭据未设置")
+                print(f"原因: 环境变量 QISKIT_IBM_TOKEN 未设置")
+                print(f"\n请设置IBM Quantum API Token:")
+                print(f"  export QISKIT_IBM_TOKEN='your_api_token_here'")
+                print(f"或在代码中设置:")
+                print(f"  os.environ['QISKIT_IBM_TOKEN'] = 'your_api_token_here'")
+                print("=" * 80)
+                print(f"回退方案: 使用本地模拟器替代")
+                print("=" * 80)
+                return QuantumBackendManager._get_local_backend(shots, ' (IBM替代)')
+            
+            service = QiskitRuntimeService()
+            
+            if backend_name.lower() == 'ibm_simulator':
+                backend = service.least_busy(simulator=True, operational=True)
+            else:
+                backend = service.least_busy(simulator=False, operational=True)
+            
+            backend_info['backend'] = backend
+            backend_info['type'] = 'ibm'
+            backend_info['name'] = backend.name
+            backend_info['shots'] = shots
+            
+        except Exception as e:
+            QuantumBackendManager._print_error(
+                "IBM Quantum后端设置失败",
+                str(e),
+                traceback.format_exc(),
+                "使用本地模拟器替代"
+            )
+            backend_info = QuantumBackendManager._get_local_backend(shots)
+            
+        return backend_info

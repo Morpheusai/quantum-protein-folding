@@ -64,11 +64,11 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 # 根据模式生成不同的日志文件名
 if [ "$MODE" = "estimator" ]; then
     LOG_FILE="run_estimator_${TIMESTAMP}.log"
-    PYTHON_SCRIPT="run_opt.py"
+    PYTHON_SCRIPT="run_estimator.py"
     SESSION_NAME="${SESSION_NAME}_estimator"
 else
     LOG_FILE="run_sampler_${TIMESTAMP}.log"
-    PYTHON_SCRIPT="run_opt_sampler.py"
+    PYTHON_SCRIPT="run_sampler.py"
     SESSION_NAME="${SESSION_NAME}_sampler"
 fi
 

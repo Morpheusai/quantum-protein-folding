@@ -1,3 +1,15 @@
+# -*- coding: utf-8 -*-
+"""
+量子蛋白质折叠模拟程序 (Quantum Protein Folding Simulation)
+
+该程序使用量子计算技术模拟蛋白质折叠过程，通过量子变分算法寻找最低能量构象。
+主要功能包括：
+- 量子比特映射和哈密顿量构建
+- CVaR-VQE 多起点优化
+- 蛋白质3D结构可视化
+- PDB文件生成
+"""
+
 import os
 import sys
 import csv
@@ -12,19 +24,20 @@ from mpl_toolkits.mplot3d import Axes3D
 qupepfold_path = Path(__file__).parent / "QuPepFold" / "QuPepFold"
 sys.path.insert(0, str(qupepfold_path))
 
+# 导入 QuPepFold 核心模块
 from qupepfold.qupepfold import (
-    generate_turn2qubit,
-    count_interaction_qubits,
-    build_mj_interactions,
-    optimize_cvar_multistart,
-    build_scalable_ansatz,
-    statevector_fold_probs,
-    exact_hamiltonian,
-    turns_from_cfg_bits,
-    dihedrals_from_turns,
-    build_backbone_3d,
-    write_pdb_with_conect,
-    plot_energy_breakdown_for_most_negative,
+    generate_turn2qubit,           # 生成转角到量子比特的映射
+    count_interaction_qubits,      # 计算相互作用量子比特数量
+    build_mj_interactions,         # 构建 Miyazawa-Jernigan 相互作用矩阵
+    optimize_cvar_multistart,      # CVaR-VQE 多起点优化
+    build_scalable_ansatz,         # 构建可扩展的量子电路
+    statevector_fold_probs,        # 计算状态向量折叠概率
+    exact_hamiltonian,             # 计算精确哈密顿量
+    turns_from_cfg_bits,           # 从配置比特生成转角
+    dihedrals_from_turns,          # 从转角生成二面角
+    build_backbone_3d,             # 构建蛋白质骨架3D结构
+    write_pdb_with_conect,         # 写入带连接的PDB文件
+    plot_energy_breakdown_for_most_negative,  # 绘制能量分解图
 )
 
 
@@ -32,38 +45,42 @@ def plot_protein_3d(atoms, seq, title, output_path):
     """
     绘制蛋白质 3D 结构图
     
+    该函数使用 matplotlib 绘制蛋白质的3D结构，包括原子、化学键和氨基酸标签。
+    
     Args:
         atoms: 原子坐标列表 [{"name": "N", "coords": (x, y, z)}, ...]
         seq: 氨基酸序列
         title: 图表标题
         output_path: 输出文件路径
     """
+    # 创建图形和3D坐标轴
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
     
-    # 颜色映射
+    # 原子颜色映射
     color_map = {
-        'N': '#1f77b4',      # 蓝色
-        'CA': '#d62728',     # 红色
-        'C': '#2ca02c',      # 绿色
-        'O': '#ff7f0e',      # 橙色
-        'CB': '#9467bd'      # 紫色
+        'N': '#1f77b4',      # 蓝色 - 氮原子
+        'CA': '#d62728',     # 红色 - α碳原子
+        'C': '#2ca02c',      # 绿色 - 碳原子
+        'O': '#ff7f0e',      # 橙色 - 氧原子
+        'CB': '#9467bd'      # 紫色 - β碳原子
     }
     
-    # 提取坐标
+    # 提取原子坐标和属性
     x_coords = []
     y_coords = []
     z_coords = []
     colors = []
     sizes = []
     
+    # 遍历所有原子，提取坐标和设置可视化属性
     for atom in atoms:
         x, y, z = atom['coords']
         x_coords.append(x)
         y_coords.append(y)
         z_coords.append(z)
-        colors.append(color_map.get(atom['name'], 'gray'))
-        # 增大原子尺寸，CA 原子更大
+        colors.append(color_map.get(atom['name'], 'gray'))  # 根据原子类型设置颜色
+        # 增大原子尺寸，CA 原子更大（α碳原子是蛋白质骨架的关键原子）
         sizes.append(200 if atom['name'] == 'CA' else 120)
     
     # 绘制原子（使用更大的尺寸和更高的透明度）
@@ -196,116 +213,146 @@ def plot_protein_3d(atoms, seq, title, output_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="run_qupepfold", description="Quantum Protein Folding Simulation")
-    parser.add_argument("--seq", type=str,default='APRLRFY' , help="Protein sequence (2-10 aa, e.g., APRLRFY)")
-    parser.add_argument("--tries", type=int, default=20, help="Number of CVaR multi-start attempts")
-    parser.add_argument("--alpha", type=float, default=0.025, help="CVaR tail mass (0<alpha<1)")
-    parser.add_argument("--shots", type=int, default=1024, help="(Informational) shots to report")
-    parser.add_argument("--backend", default="local", choices=["local", "aws_sv1", "aws_garnet", "aws_forte"], help="Quantum backend (default: local)")
+    """
+    主函数：量子蛋白质折叠模拟程序入口点
+    
+    该函数处理命令行参数，执行量子蛋白质折叠模拟，并生成结果文件。
+    """
+    # 设置命令行参数解析器
+    parser = argparse.ArgumentParser(prog="run_qupepfold", description="量子蛋白质折叠模拟程序 (Quantum Protein Folding Simulation)")
+    # 蛋白质序列参数 (2-10个氨基酸)
+    parser.add_argument("--seq", type=str, default='APRLRFY',help="蛋白质序列 (2-10个氨基酸, 例如: APRLRFY)")
+    # CVaR-VQE 优化参数
+    parser.add_argument("--tries", type=int, default=10,help="CVaR多起点优化尝试次数 (默认: 10)")
+    parser.add_argument("--alpha", type=float, default=0.025,help="CVaR尾部质量参数 (0<alpha<1, 默认: 0.025)")
+    # 量子计算参数
+    parser.add_argument("--shots", type=int, default=1024,help="(信息性) 量子测量次数 (默认: 1024)")
+    parser.add_argument("--backend", default="local",choices=["local", "aws_sv1", "aws_garnet", "aws_forte"],help="量子计算后端 (默认: local)")
+    # 解析命令行参数
     args = parser.parse_args()
 
+    # 验证蛋白质序列
     seq = args.seq.upper()
     if not (2 <= len(seq) <= 10) or any(c not in "ARNDCEQGHILKMFPSTWYV" for c in seq):
-        raise SystemExit("ERROR: --seq must be 2-10 amino acids using standard one-letter codes.")
+        raise SystemExit("错误: --seq 参数必须是2-10个标准单字母代码的氨基酸。")
 
-    # Create output directory with timestamp and backend
+    # 创建带时间戳和后端名称的输出目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backend_name = args.backend
     output_dir = Path("./results") / f"{timestamp}_{backend_name}_qupepfold"
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Output directory: {output_dir}")
+    print(f"输出目录: {output_dir}")
 
-    # Build mapping & hyper (aligned with the core module)
+    # 构建量子比特映射和超参数 (与核心模块对齐)
+    # 生成转角到量子比特的映射
     turn2qubit, fixed_bits, variable_bits = generate_turn2qubit(seq)
-    num_q_cfg = turn2qubit.count("q")
-    num_q_int = count_interaction_qubits(seq)
+    
+    # 计算配置量子比特和相互作用量子比特数量
+    num_q_cfg = turn2qubit.count("q")  # 配置量子比特数量
+    num_q_int = count_interaction_qubits(seq)  # 相互作用量子比特数量
+    
+    # 构建超参数字典
     hyper = {
-        "protein": seq,
-        "turn2qubit": turn2qubit,
-        "numQubitsConfig": num_q_cfg,
-        "numQubitsInteraction": num_q_int,
-        "interactionEnergy": build_mj_interactions(seq),
-        "numShots": int(args.shots),
+        "protein": seq,                           # 蛋白质序列
+        "turn2qubit": turn2qubit,                 # 转角到量子比特映射
+        "numQubitsConfig": num_q_cfg,            # 配置量子比特数量
+        "numQubitsInteraction": num_q_int,        # 相互作用量子比特数量
+        "interactionEnergy": build_mj_interactions(seq),  # Miyazawa-Jernigan相互作用能量
+        "numShots": int(args.shots),              # 量子测量次数
     }
 
-    print("=== Qubit mapping ===")
-    print("turn2qubit:", turn2qubit)
-    print("fixed bits:", fixed_bits)
-    print("var bits:  ", variable_bits)
-    print(f"cfg qubits: {num_q_cfg}  |  int qubits: {num_q_int}  |  total (incl. ancilla): {num_q_cfg+num_q_int+1}")
+    # 打印量子比特映射信息
+    print("=== 量子比特映射 ===")
+    print("转角到量子比特映射:", turn2qubit)
+    print("固定比特:", fixed_bits)
+    print("可变比特:", variable_bits)
+    print(f"配置量子比特: {num_q_cfg}  |  相互作用量子比特: {num_q_int}  |  总计(含辅助比特): {num_q_cfg+num_q_int+1}")
 
-    # Optimize CVaR (multi-start)
-    print(f"\n[CVaR-VQE] alpha={args.alpha}, tries={args.tries}")
+    # CVaR-VQE 多起点优化
+    print(f"\n[CVaR-VQE] alpha={args.alpha}, 尝试次数={args.tries}")
     best_x, best_cvar, trace = optimize_cvar_multistart(hyper, args.tries, args.alpha)
-    print(f"[CVaR-VQE] best CVaR energy: {best_cvar:.6f}")
+    print(f"[CVaR-VQE] 最优CVaR能量: {best_cvar:.6f}")
 
-    # Distribution at optimum (statevector)
-    qc = build_scalable_ansatz(best_x, hyper, measure=False)
-    probs = statevector_fold_probs(qc, hyper)
-    states = list(probs.keys())
-    energies = exact_hamiltonian(states, hyper)
+    # 在最优解处计算概率分布 (使用状态向量)
+    qc = build_scalable_ansatz(best_x, hyper, measure=False)  # 构建可扩展量子电路
+    probs = statevector_fold_probs(qc, hyper)                 # 计算状态向量折叠概率
+    states = list(probs.keys())                               # 获取所有可能的状态
+    energies = exact_hamiltonian(states, hyper)               # 计算每个状态的精确能量
 
-    # Report: most probable & most negative-energy bitstrings
-    s_most_prob = max(states, key=lambda s: probs[s])
-    s_min_idx = int(min(range(len(states)), key=lambda i: energies[i]))
-    s_min_energy = states[s_min_idx]
+    # 报告：最可能和最低能量的比特串
+    s_most_prob = max(states, key=lambda s: probs[s])         # 概率最高的比特串
+    s_min_idx = int(min(range(len(states)), key=lambda i: energies[i]))  # 能量最低的索引
+    s_min_energy = states[s_min_idx]                          # 能量最低的比特串
 
-    print("\n=== Results at optimum ===")
-    print(f"Most probable bitstring : {s_most_prob} (P={probs[s_most_prob]:.6f})")
-    print(f"Lowest-energy bitstring : {s_min_energy} (E={energies[s_min_idx]:.6f})")
+    print("\n=== 最优解结果 ===")
+    print(f"最可能比特串 : {s_most_prob} (概率={probs[s_most_prob]:.6f})")
+    print(f"最低能量比特串 : {s_min_energy} (能量={energies[s_min_idx]:.6f})")
 
-    # CSV dump (always enabled)
+    # CSV 数据导出 (始终启用)
     csv_path = output_dir / "bitstring_summary.csv"
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["bitstring", "cfg_bits", "probability", "energy"])
         for s, e in zip(states, energies):
             w.writerow([s, s[:num_q_cfg], float(probs[s]), float(e)])
-    print(f"\nWrote CSV -> {csv_path}")
+    print(f"\n写入CSV文件 -> {csv_path}")
 
-    # Generate PDB files and visualizations for most probable and lowest-energy bitstrings
-    print("\n=== Generating PDB files and visualizations ===")
+    # 为最可能和最低能量的比特串生成PDB文件和可视化
+    print("\n=== 生成PDB文件和可视化 ===")
     
-    # Create pdb3d subdirectory
+    # 创建pdb3d子目录
     pdb_dir = output_dir / "pdb3d"
     os.makedirs(pdb_dir, exist_ok=True)
     
-    # Generate PDB for most probable bitstring
-    cfg_bits_most_prob = s_most_prob[:num_q_cfg]
-    turns_most_prob = turns_from_cfg_bits(cfg_bits_most_prob, turn2qubit)
-    phis_most_prob, psis_most_prob = dihedrals_from_turns(turns_most_prob, len(seq))
-    atoms_most_prob = build_backbone_3d(seq, phis_most_prob, psis_most_prob)
+    # 为最可能比特串生成PDB文件
+    cfg_bits_most_prob = s_most_prob[:num_q_cfg]  # 提取配置比特
+    turns_most_prob = turns_from_cfg_bits(cfg_bits_most_prob, turn2qubit)  # 从配置比特生成转角
+    phis_most_prob, psis_most_prob = dihedrals_from_turns(turns_most_prob, len(seq))  # 生成二面角
+    atoms_most_prob = build_backbone_3d(seq, phis_most_prob, psis_most_prob)  # 构建蛋白质骨架3D结构
     pdb_path_most_prob = pdb_dir / f"fold3d_most_probable_{cfg_bits_most_prob}.pdb"
     write_pdb_with_conect(cfg_bits_most_prob, seq, atoms_most_prob, str(pdb_path_most_prob))
-    print(f"Most probable PDB -> {pdb_path_most_prob}")
+    print(f"最可能结构PDB -> {pdb_path_most_prob}")
     
-    # Generate 3D structure plot for most probable bitstring
+    # 为最可能比特串生成3D结构图
     plot_path_most_prob = output_dir / f"3d_structure_most_probable_{cfg_bits_most_prob}.png"
     plot_protein_3d(atoms_most_prob, seq, 
-                   f"Most Probable Structure - {seq} (P={probs[s_most_prob]:.6f})", 
+                   f"最可能结构 - {seq} (概率={probs[s_most_prob]:.6f})", 
                    str(plot_path_most_prob))
     
-    # Generate PDB for lowest-energy bitstring
-    cfg_bits_min_energy = s_min_energy[:num_q_cfg]
-    turns_min_energy = turns_from_cfg_bits(cfg_bits_min_energy, turn2qubit)
-    phis_min_energy, psis_min_energy = dihedrals_from_turns(turns_min_energy, len(seq))
-    atoms_min_energy = build_backbone_3d(seq, phis_min_energy, psis_min_energy)
+    # 为最低能量比特串生成PDB文件
+    cfg_bits_min_energy = s_min_energy[:num_q_cfg]  # 提取配置比特
+    turns_min_energy = turns_from_cfg_bits(cfg_bits_min_energy, turn2qubit)  # 从配置比特生成转角
+    phis_min_energy, psis_min_energy = dihedrals_from_turns(turns_min_energy, len(seq))  # 生成二面角
+    atoms_min_energy = build_backbone_3d(seq, phis_min_energy, psis_min_energy)  # 构建蛋白质骨架3D结构
     pdb_path_min_energy = pdb_dir / f"fold3d_lowest_energy_{cfg_bits_min_energy}.pdb"
     write_pdb_with_conect(cfg_bits_min_energy, seq, atoms_min_energy, str(pdb_path_min_energy))
-    print(f"Lowest-energy PDB -> {pdb_path_min_energy}")
+    print(f"最低能量结构PDB -> {pdb_path_min_energy}")
     
-    # Generate 3D structure plot for lowest-energy bitstring
+    # 为最低能量比特串生成3D结构图
     plot_path_min_energy = output_dir / f"3d_structure_lowest_energy_{cfg_bits_min_energy}.png"
     plot_protein_3d(atoms_min_energy, seq, 
-                   f"Lowest Energy Structure - {seq} (E={energies[s_min_idx]:.6f})", 
+                   f"最低能量结构 - {seq} (能量={energies[s_min_idx]:.6f})", 
                    str(plot_path_min_energy))
     
-    # Generate energy breakdown plot for lowest-energy bitstring
-    print("\nGenerating energy breakdown visualization...")
+    # 生成最低能量比特串的能量分解图
+    print("\n生成能量分解可视化...")
     plot_energy_breakdown_for_most_negative(probs, hyper, str(output_dir))
-    print(f"Energy breakdown plot -> {output_dir / 'most_negative_energy_breakdown.png'}")
+    print(f"能量分解图 -> {output_dir / 'most_negative_energy_breakdown.png'}")
 
 
 if __name__ == "__main__":
+    """
+    程序入口点
+    
+    当直接运行此脚本时，执行量子蛋白质折叠模拟。
+    使用方法：
+        python run_qupepfold.py --seq APRLRFY --backend local --tries 10 --alpha 0.025
+    
+    技术说明：
+    - 使用CVaR-VQE算法进行量子优化
+    - 支持本地模拟器和AWS量子后端
+    - 生成PDB文件和3D可视化结果
+    - 输出详细的能量和概率分析
+    """
     main()

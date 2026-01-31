@@ -72,6 +72,10 @@ class TranspilingSampler(BaseSamplerV2):
                 circuit: QuantumCircuit = cast(QuantumCircuit, pub)
 
             logger.debug("Transpiling circuit with %s qubits", circuit.num_qubits)
+            
+            # Don't remove final measurements - they are needed for sampling
+            # circuit.remove_final_measurements()
+            
             transpiled_circuit: QuantumCircuit = transpile(
                 circuit,
                 backend=self._backend,

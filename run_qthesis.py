@@ -63,10 +63,10 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument("--main_chain",type=str,default="APRLRFY",help="主蛋白链序列 (默认: APRLRFY)")
     parser.add_argument("--side_chain",type=str,default=None,help="侧链蛋白序列 (默认: '_' * len(main_chain))")
-    parser.add_argument("--backend",type=str,choices=["local_statevector", "ibm_quantum", "aws_sim_quantum", "aws_qc_quantum"],default="local_statevector",help="量子后端类型 (默认: local_statevector)")
+    parser.add_argument("--backend",type=str,choices=["local", "ibm_quantum", "aws_sv1", "aws_garnet"],default="local",help="量子后端类型 (默认: local)")
     parser.add_argument("--interaction_type",type=str,choices=["MJ", "HP"],default="MJ",help="相互作用模型: MJ (Miyazawa-Jernigan) 或 HP (疏水-极性) (默认: MJ)")
     parser.add_argument("--shots",type=int,default=100,help="硬件执行的测量次数 (默认: 100)")
-    parser.add_argument("--output_dir",type=str,default=None,help="结果输出目录 (默认: <root>/results)")
+    parser.add_argument("--output_dir",type=str,default=None,help="结果输出基础目录，实际结果将保存在该目录下的 {时间戳}_qthesis_{backend} 子目录中 (默认: <root>/results)")
     parser.add_argument("--encoding",type=str,choices=["DENSE", "SPARSE"],default="DENSE",help="构象编码类型 (默认: DENSE)")
     
     return parser.parse_args()
@@ -77,10 +77,10 @@ def apply_config(args: argparse.Namespace) -> None:
     from enums import BackendType, ConformationEncoding, InteractionType
     
     backend_map = {
-        "local_statevector": BackendType.LOCAL_STATEVECTOR,
+        "local": BackendType.LOCAL_STATEVECTOR,
         "ibm_quantum": BackendType.IBM_QUANTUM,
-        "aws_sim_quantum": BackendType.AWS_SIM_QUANTUM,
-        "aws_qc_quantum": BackendType.AWS_QC_QUANTUM,
+        "aws_sv1": BackendType.AWS_SIM_QUANTUM,
+        "aws_garnet": BackendType.AWS_QC_QUANTUM,
     }
     
     encoding_map = {
@@ -100,12 +100,16 @@ def apply_config(args: argparse.Namespace) -> None:
     constants.INTERACTION_TYPE = interaction_map[args.interaction_type]
     constants.IBM_QUANTUM_SHOTS = args.shots
     
+    # 设置结果基础目录
+    root_dir = Path(__file__).parent
     if args.output_dir:
+        # 如果用户指定了output_dir，则直接使用该目录作为结果目录
+        # 但仍会在该目录下创建 {时间戳}_qthesis_{backend} 的子目录
         output_path = Path(args.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         constants.RESULTS_DATA_DIRPATH = output_path
     else:
-        root_dir = Path(__file__).parent
+        # 默认情况下使用项目根目录下的results文件夹
         constants.RESULTS_DATA_DIRPATH = root_dir / "results"
 
 

@@ -251,6 +251,36 @@ def main():
     # 计算配置量子比特和相互作用量子比特数量
     num_q_cfg = turn2qubit.count("q")  # 配置量子比特数量
     num_q_int = count_interaction_qubits(seq)  # 相互作用量子比特数量
+
+    print("\n" + "=" * 60)
+    print("run_qupepfold.py - Qubit 和 Shot 信息")
+    print("=" * 60)
+    print()
+    print("【输入参数】")
+    print(f"  蛋白质序列: {seq}")
+    print(f"  量子后端: {args.backend}")
+    print(f"  CVaR alpha: {args.alpha}")
+    print(f"  尝试次数: {args.tries}")
+    print(f"  Shot 数量: {args.shots}")
+    print()
+    print("【Qubit 数量】")
+    print(f"  配置量子比特: {num_q_cfg}")
+    print(f"  相互作用量子比特: {num_q_int}")
+    print(f"  总计(含辅助比特): {num_q_cfg + num_q_int + 1}")
+    print()
+    print("【Qubit 计算说明】")
+    print(f"  配置量子比特 = 转角到量子比特映射中的 'q' 数量")
+    print(f"  相互作用量子比特 = count_interaction_qubits({seq})")
+    print(f"  辅助比特 = 1 (用于 CVaR-VQE)")
+    print()
+    print("【Shot 配置】")
+    print(f"  默认 Shot 数量: 1024")
+    print(f"  当前 Shot 数量: {args.shots}")
+    print(f"  配置方式: --shots 参数")
+    print(f"  应用位置: hyper['numShots']")
+    print()
+    print("=" * 60)
+    print()
     
     # 构建超参数字典
     hyper = {
@@ -261,13 +291,6 @@ def main():
         "interactionEnergy": build_mj_interactions(seq),  # Miyazawa-Jernigan相互作用能量
         "numShots": int(args.shots),              # 量子测量次数
     }
-
-    # 打印量子比特映射信息
-    print("=== 量子比特映射 ===")
-    print("转角到量子比特映射:", turn2qubit)
-    print("固定比特:", fixed_bits)
-    print("可变比特:", variable_bits)
-    print(f"配置量子比特: {num_q_cfg}  |  相互作用量子比特: {num_q_int}  |  总计(含辅助比特): {num_q_cfg+num_q_int+1}")
 
     # CVaR-VQE 多起点优化
     print(f"\n[CVaR-VQE] alpha={args.alpha}, 尝试次数={args.tries}")

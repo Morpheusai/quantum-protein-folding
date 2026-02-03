@@ -213,16 +213,18 @@ def calculate_cvar_energy(counts, qubit_op, alpha):
     """
     energies = []
     
-    # 计算每个比特串的能量（不按出现次数复制，避免对采样结果加权）
+    # 计算每个比特串的能量，并根据出现次数复制
     for bitstring, count in counts.items():
         e = estimate_energy_from_bitstring(bitstring, qubit_op)
-        energies.append(e)
+        # 根据出现次数复制能量值，保持正确的权重
+        energies.extend([e] * count)
     
     # 按能量值升序排列
     energies.sort()
     
-    # 计算需要保留的样本数量（基于不同比特串的数量，而不是总shots）
-    num_keep = max(1, int(len(energies) * alpha))
+    # 计算需要保留的样本数量（基于总shots数）
+    total_shots = sum(counts.values())
+    num_keep = max(1, int(total_shots * alpha))
     
     # 返回最低能量样本的平均值
     return np.mean(energies[:num_keep])
@@ -518,7 +520,7 @@ def main():
                 # 设置最高概率比特串的振幅为1（理想情况）
                 self.eigenstate = {bs: 1.0}
                 # 设置优化得到的能量值
-                self.eigenvalue = val
+                self.eigenvalue = val                                                                                                       
                 # 提供完整的概率分布用于后续分析
                 self.probabilities = {k[::-1]: v/total for k, v in counts.items()}
         

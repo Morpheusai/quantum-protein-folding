@@ -83,21 +83,23 @@ class EnergyCalculator:
             float: CVaR能量值（最低alpha比例样本的平均能量）
             
         Note:
-            - 按不同比特串的数量计算，而不是按总shots数
+            - 按总shots数计算，保持正确的样本权重
             - alpha=0.1表示使用能量最低的10%样本
         """
         energies = []
         
-        # 计算每个比特串的能量（不按出现次数复制，避免对采样结果加权）
+        # 计算每个比特串的能量，并根据出现次数复制
         for bitstring, count in counts.items():
             e = EnergyCalculator.estimate_energy_from_bitstring(bitstring, qubit_op)
-            energies.append(e)
+            # 根据出现次数复制能量值，保持正确的权重
+            energies.extend([e] * count)
         
         # 按能量值升序排列
         energies.sort()
         
-        # 计算需要保留的样本数量（基于不同比特串的数量，而不是总shots）
-        num_keep = max(1, int(len(energies) * alpha))
+        # 计算需要保留的样本数量（基于总shots数）
+        total_shots = sum(counts.values())
+        num_keep = max(1, int(total_shots * alpha))
         
         # 返回最低能量样本的平均值
         return np.mean(energies[:num_keep])

@@ -102,15 +102,22 @@ def apply_config(args: argparse.Namespace) -> None:
     
     # 设置结果基础目录
     root_dir = Path(__file__).parent
+    from datetime import datetime
+    
+    # 创建时间戳子目录
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    subdir_name = f"{timestamp}_qthesis_{args.backend}"
+    
     if args.output_dir:
-        # 如果用户指定了output_dir，则直接使用该目录作为结果目录
-        # 但仍会在该目录下创建 {时间戳}_qthesis_{backend} 的子目录
-        output_path = Path(args.output_dir)
+        # 如果用户指定了output_dir，则在该目录下创建 {时间戳}_qthesis_{backend} 的子目录
+        output_path = Path(args.output_dir) / subdir_name
         output_path.mkdir(parents=True, exist_ok=True)
         constants.RESULTS_DATA_DIRPATH = output_path
     else:
-        # 默认情况下使用项目根目录下的results文件夹
-        constants.RESULTS_DATA_DIRPATH = root_dir / "results"
+        # 默认情况下在项目根目录下的results文件夹中创建 {时间戳}_qthesis_{backend} 的子目录
+        output_path = root_dir / "results" / subdir_name
+        output_path.mkdir(parents=True, exist_ok=True)
+        constants.RESULTS_DATA_DIRPATH = output_path
 
 
 def main() -> None:
@@ -167,6 +174,37 @@ def main() -> None:
     )
 
     vqe, counts, values = setup_vqe_optimization(num_qubits=compressed_h.num_qubits)
+
+    print("\n" + "=" * 60)
+    print("run_qthesis.py - Qubit 和 Shot 信息")
+    print("=" * 60)
+    print()
+    print("【输入参数】")
+    print(f"  主链序列: {main_chain}")
+    print(f"  侧链序列: {side_chain}")
+    print(f"  量子后端: {args.backend}")
+    print(f"  相互作用模型: {args.interaction_type}")
+    print(f"  构象编码: {args.encoding}")
+    print(f"  Shot 数量: {args.shots}")
+    print()
+    print("【Qubit 数量】")
+    print(f"  原始哈密顿量 Qubits: {compressed_h.num_qubits}")
+    print(f"  压缩比例: {(compressed_h.num_qubits / (len(main_chain) * 2 + len(side_chain) * 2) * 100):.1f}%")
+    print()
+    print("【Qubit 计算说明】")
+    print(f"  原始哈密顿量 Qubits = 主链长度 * 2 + 侧链长度 * 2")
+    print(f"  主链长度: {len(main_chain)}")
+    print(f"  侧链长度: {len(side_chain)}")
+    print(f"  总残基数: {len(main_chain) + len(side_chain)}")
+    print()
+    print("【Shot 配置】")
+    print(f"  默认 Shot 数量: 100")
+    print(f"  当前 Shot 数量: {args.shots}")
+    print(f"  配置方式: --shots 参数")
+    print(f"  应用位置: constants.IBM_QUANTUM_SHOTS")
+    print()
+    print("=" * 60)
+    print()
 
     raw_results: SamplingMinimumEigensolverResult = run_vqe_optimization(
         vqe=vqe, hamiltonian=compressed_h

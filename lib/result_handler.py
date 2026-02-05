@@ -255,7 +255,7 @@ class ResultHandler:
     @staticmethod
     def plot_vqe_convergence_with_shots(all_conv_data, iteration_shots, filename, main_chain, figsize=(12, 8)):
         """
-        绘制VQE收敛曲线图（带shots信息）
+        绘制VQE收敛曲线图（带shots信息和误差带）
         
         Args:
             all_conv_data (list): 收敛数据列表
@@ -273,13 +273,29 @@ class ResultHandler:
         for idx, data in enumerate(all_conv_data):
             color = colors[idx]
             label = data.get('label', f'Run {idx+1}')
-            x_values = range(len(data['values']))
+            values = np.array(data['values'])
+            stds = np.array(data.get('stds', []))
+            x_values = range(len(values))
+            
             if 'CVaR' in label:
                 linestyle = '--'
             else:
                 linestyle = '-'
-            line, = ax1.plot(x_values, data['values'], marker='o', label=label, 
+            
+            # 绘制主线
+            line, = ax1.plot(x_values, values, marker='o', label=label, 
                             linewidth=3, color=color, linestyle=linestyle)
+            
+            # 如果有标准差数据，绘制误差带 (mean ± std)
+            if len(stds) == len(values) and len(stds) > 0:
+                try:
+                    # 确保 stds 是数值类型
+                    stds_float = stds.astype(float)
+                    ax1.fill_between(x_values, values - stds_float, values + stds_float, 
+                                     color=color, alpha=0.2, label=f'{label} Std Dev')
+                except Exception:
+                    pass # 如果无法转换，跳过误差带绘制
+
             energy_lines.append(line)
             labels.append(label)
         

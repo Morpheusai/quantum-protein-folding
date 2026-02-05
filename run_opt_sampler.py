@@ -29,11 +29,15 @@ from qiskit import QuantumCircuit, transpile
 from qiskit.circuit.library import RealAmplitudes
 from qiskit_braket_provider import BraketProvider
 from scipy.optimize import minimize
+from qiskit_algorithms.optimizers import SPSA
 import traceback
 from lib.job_metadata_logger import JobMetadataLogger
 
 # 创建元数据记录器实例
 metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
+
+# 引入 Job 记录器
+from lib.quantum_optimizer import JobRecorder
 
 
 
@@ -42,12 +46,35 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
 
+class MockResult:
+    """模拟量子结果类，用于解析蛋白质结构"""
+    def __init__(self, eigenstate, eigenvalue, counts, total_shots):
+        self.eigenstate = eigenstate  # 字典 {bitstring: 1.0}
+        self.eigenvalue = eigenvalue
+        self.counts = counts
+        self.total_shots = total_shots
+        self.probabilities = {k[::-1]: v/total_shots for k, v in counts.items()}
+    
+    def get_eigenstate(self): return self.eigenstate
+    def get_eigenvalue(self): return self.eigenvalue
+    def get_counts(self): return self.counts
+    def get_total_shots(self): return self.total_shots
+    def get_most_probable_state(self):
+        if not self.counts: return self.eigenstate
+        max_c = -1
+        best_s = None
+        for s, c in self.counts.items():
+            if c > max_c:
+                max_c = c
+                best_s = s
+        return best_s
+
 # ====================
 # 参数配置
 # ====================
 parser = argparse.ArgumentParser(description='蛋白质折叠量子算法 - 采样器模式')
 parser.add_argument('--backend', default='local', help='量子后端选择: local (本地模拟器，优先使用AerSimulator), local_aer (强制使用AerSimulator), aws_sv1 (AWS模拟器), aws_garnet (AWS量子芯片), aws_ionq (AWS IonQ量子设备), aws_forte (AWS IonQ Forte量子设备), ibm (IBM量子设备), ibm_simulator (IBM模拟器)')
-parser.add_argument('--random_seed', type=int, default=23, help='随机种子，用于确保结果可重现')
+parser.add_argument('--random_seed', type=int, default=42, help='随机种子，用于确保结果可重现')
 parser.add_argument('--max_optimization_iterations', type=int, default=10, help='最大优化迭代次数')
 parser.add_argument('--ansatz_reps', type=int, default=1, help='变分量子线路的重复层数')
 parser.add_argument('--main_chain', default='APRLRFY', help='蛋白质主链氨基酸序列')
@@ -58,6 +85,19 @@ parser.add_argument('--alpha', type=float, default=0.25, help='CVaR参数: 选�
 parser.add_argument('--shots', type=int, default=100, help='量子测量采样次数')
 parser.add_argument('--max_results', type=int, default=1, help='每次迭代的结果数量')
 parser.add_argument('--aws_region', default=None, help='AWS区域设置（可选）')
+
+# 优化增强参数
+parser.add_argument('--optimizer', default='COBYLA', help='优化器选择: COBYLA (默认), SPSA, SLSQP')
+
+# 自适应Shots参数
+parser.add_argument('--adaptive_shots', action='store_true', help='开启自适应Shots策略')
+parser.add_argument('--min_shots', type=int, default=100, help='自适应Shots的最小采样数 (默认为100)')
+parser.add_argument('--max_shots', type=int, default=2000, help='自适应Shots的最大采样数 (默认为2000)')
+parser.add_argument('--unique_structures', action='store_true', help='开启结构去重：仅返回折叠结构不同的最优结果')
+parser.add_argument('--restarts', type=int, default=1, help='独立实验运行次数 (Multi-Restart)，用于避免局部最优，默认为1')
+parser.add_argument('--dry_run', action='store_true', help='干跑模式：仅在真实提交前进行本地预检')
+parser.add_argument('--resume', type=str, default=None, help='断点续传：指定结果目录以恢复历史任务')
+parser.add_argument('--initial_params', type=str, default=None, help='Warm-Start：从 JSON 文件加载初始参数向量')
 args = parser.parse_args()
 
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -69,7 +109,8 @@ os.makedirs(RESULT_DIR, exist_ok=True)
 # ====================
 
 def setup_sampler_backend(backend_name, aws_region=None, shots=1000):
-    """配置支持采样器模式的量子后端，兼容多种量子云服务"""
+    """配置支持采样器模式的量子后端，兼容多种量子云服务，并支持 SamplerV2"""
+    backend_info = {'backend': None, 'sampler_v2': None}
     try:
         if backend_name.lower() == 'aws_sv1':
             from qiskit_braket_provider import BraketProvider
@@ -77,91 +118,72 @@ def setup_sampler_backend(backend_name, aws_region=None, shots=1000):
             provider = BraketProvider()
             backend = provider.get_backend('SV1')
             print(f"✓ AWS SV1 已连接")
-            return backend
+            backend_info['backend'] = backend
         elif backend_name.lower() == 'aws_garnet':
             from qiskit_braket_provider import BraketProvider
             if aws_region: os.environ['AWS_DEFAULT_REGION'] = aws_region
             provider = BraketProvider()
             backend = provider.get_backend('Garnet')
             print(f"✓ AWS Garnet 已连接")
-            return backend
+            backend_info['backend'] = backend
         elif backend_name.lower() == 'aws_ionq':
             from qiskit_braket_provider import BraketProvider
             if aws_region: os.environ['AWS_DEFAULT_REGION'] = aws_region
             provider = BraketProvider()
-            # 获取 IonQ Harmony (11 qubits)
             backend = provider.get_backend('IonQ Device')
             print(f"✓ AWS IonQ Harmony 已连接")
-            return backend
+            backend_info['backend'] = backend
         elif backend_name.lower() == 'aws_forte':
             from qiskit_braket_provider import BraketProvider
             if aws_region: os.environ['AWS_DEFAULT_REGION'] = aws_region
             provider = BraketProvider()
-            # 获取 IonQ Forte-1 (30+ qubits)
             backend = provider.get_backend('Forte 1')
             print(f"✓ AWS IonQ Forte-1 已连接")
-            return backend
+            backend_info['backend'] = backend
         elif backend_name.lower() == 'ibm':
+            from qiskit_ibm_runtime import QiskitRuntimeService
+            service = QiskitRuntimeService()
+            backend = service.least_busy(operational=True, simulator=False)
+            print(f"✓ IBM 量子后端已连接: {backend.name}")
+            backend_info['backend'] = backend
+            # 初始化 IBM SamplerV2
             try:
-                from qiskit_ibm_runtime import QiskitRuntimeService
-                service = QiskitRuntimeService()
-                # 使用性能最好的可用设备
-                backend = service.least_busy(operational=True, simulator=False)
-                print(f"✓ IBM 量子后端已连接: {backend.name}")
-                return backend
-            except Exception as e:
-                print(f"✗ IBM 真实硬件连接失败: {e}")
-                print("  提示: 请确保已通过 'qiskit-ibm-runtime' 配置 IBM Quantum 访问凭据")
-                # 回退到IBM模拟器
-                try:
-                    from qiskit_ibm_runtime import QiskitRuntimeService
-                    service = QiskitRuntimeService()
-                    # 使用IBM模拟器
-                    backend = service.backend("ibmq_qasm_simulator")
-                    print(f"✓ IBM 模拟器已连接: {backend.name}")
-                    return backend
-                except Exception as sim_e:
-                    print(f"✗ IBM 模拟器连接也失败: {sim_e}")
-                    # 最终回退到本地模拟器
-                    from qiskit.providers.basic_provider import BasicSimulator
-                    backend = BasicSimulator()
-                    print("  ✓ 已回退到本地 BasicSimulator")
-                    return backend
+                from qiskit_ibm_runtime import SamplerV2 as IBMSampler
+                backend_info['sampler_v2'] = IBMSampler(mode=backend)
+                print(f"✓ 已配置 IBM SamplerV2 接口")
+            except: pass
         elif backend_name.lower() == 'ibm_simulator':
             from qiskit_ibm_runtime import QiskitRuntimeService
             service = QiskitRuntimeService()
-            # 使用IBM模拟器
             backend = service.backend("ibmq_qasm_simulator")
             print(f"✓ IBM 模拟器已连接: {backend.name}")
-            return backend
-        elif backend_name.lower() == 'local_aer':
-            # 使用AerSimulator作为本地后端
+            backend_info['backend'] = backend
+        elif backend_name.lower() in ('local_aer', 'local'):
             try:
                 from qiskit_aer import AerSimulator
                 backend = AerSimulator()
                 print("✓ 本地 AerSimulator 已就绪")
+                # 初始化本地 SamplerV2
+                from qiskit.primitives import StatevectorSampler
+                backend_info['sampler_v2'] = StatevectorSampler()
+                print("✓ 已配置本地 SamplerV2 (StatevectorSampler)")
             except ImportError:
-                print("⚠ AerSimulator 不可用，回退到 BasicSimulator")
                 from qiskit.providers.basic_provider import BasicSimulator
                 backend = BasicSimulator()
                 print("✓ 本地 BasicSimulator 已就绪")
-            return backend
+            backend_info['backend'] = backend
         else:
-            # 默认本地后端，优先使用AerSimulator，如果不可用则回退到BasicSimulator
-            try:
-                from qiskit_aer import AerSimulator
-                backend = AerSimulator()
-                print("✓ 本地 AerSimulator 已就绪")
-            except ImportError:
-                from qiskit.providers.basic_provider import BasicSimulator
-                backend = BasicSimulator()
-                print("✓ 本地 BasicSimulator 已就绪")
-            return backend
+            from qiskit.providers.basic_provider import BasicSimulator
+            backend = BasicSimulator()
+            backend_info['backend'] = backend
+            print("✓ 本地 BasicSimulator 已就绪")
+            
+        return backend_info
     except Exception as e:
         print(f"✗ 后端设置失败: {e}")
-        traceback.print_exc()  # 输出详细的错误追踪
         from qiskit.providers.basic_provider import BasicSimulator
-        return BasicSimulator()
+        backend_info['backend'] = BasicSimulator()
+        return backend_info
 
 # ====================
 # 能量计算逻辑
@@ -284,7 +306,9 @@ def main():
     num_qubits = qubit_op.num_qubits  # 获取所需量子比特数
 
     # 2. 根据参数选择合适的量子计算后端
-    backend = setup_sampler_backend(args.backend, args.aws_region, args.shots)
+    backend_info = setup_sampler_backend(args.backend, args.aws_region, args.shots)
+    backend = backend_info['backend']
+    sampler_v2 = backend_info['sampler_v2']
     print(f"✓ 量子后端已就绪 | 量子比特数: {num_qubits}")
 
     # 3. 构建参数化量子电路
@@ -306,226 +330,269 @@ def main():
     
     # 根据后端类型决定是否转译电路
     # 本地模拟器通常不需要转译，而云量子设备需要针对硬件特性进行转译
-    if args.backend.lower() == 'local':
+    if args.backend.lower() in ['local', 'local_aer', 'local_qiskit']:
         # 对于本地模拟器，直接使用原始电路
         transpiled_circuit = clean_circuit
     else:
-        # 对于AWS后端，需要转译电路以适配目标设备的拓扑和门集
-        transpiled_circuit = transpile(clean_circuit,backend=backend,
-                                        initial_layout=list(range(num_qubits)) if args.backend != 'local' else None,
+        # 对于其他后端，特别是云端设备，需要转译电路以适配目标设备的拓扑和门集
+        transpiled_circuit = transpile(clean_circuit, backend=backend,
+                                        initial_layout=list(range(clean_circuit.num_qubits)),
                                         optimization_level=3
                                       )
     print(f"   逻辑比特数 (算法需求): {clean_circuit.num_qubits}")
     print(f"   转译后物理比特数 (硬件占用): {transpiled_circuit.num_qubits}")
+    
+    # 干跑模式 (Dry-Run)
+    if args.dry_run:
+        print("\n    [Dry-Run] 正在执行 Sampler 预检...")
+        try:
+            test_params = np.random.uniform(-np.pi, np.pi, ansatz.num_parameters)
+            if sampler_v2:
+                job = sampler_v2.run([(transpiled_circuit, test_params)], shots=10)
+            else:
+                bound_c = transpiled_circuit.assign_parameters(test_params)
+                job = backend.run(bound_c, shots=10)
+            JobRecorder.record_job(job, RESULT_DIR, label="dry_run_sampler")
+            job.result()
+            print("    ✓ Sampler 预检通过")
+        except Exception as e:
+            print(f"    ❌ Sampler 预检失败: {e}")
+            raise e
+
     all_conv_data = []
+    global_candidates = [] # 初始化全球候选池
+    best_energy = float('inf')
+    best_results_tuple = None # 将在第一次实验后初始化
+    best_trial_idx = 1
     
-    # 单次运行，用户如需重复运行可重新调用
-    print(f"\n--- 实验 1/1 ---")
-    np.random.seed(args.random_seed)
-    
-    convergence_history = []
-    cumulative_shots_history = []  # 记录累计shots数
-    iteration_shots_history = []  # 记录每次迭代的实际shots数
-    iteration_results = []  # 记录每次迭代的多个结果
-    
-    # 存储每次迭代的多个最优结果的能量值，用于生成收敛图
-    all_top_energies = []
-    
-    # 创建迭代结果目录
-    iteration_result_dir = os.path.join(RESULT_DIR, "iter_all_results")
-    os.makedirs(iteration_result_dir, exist_ok=True)
-
-    def objective_function(params):
-        """
-        优化目标函数
-        该函数接受参数，执行量子电路，使用CVaR策略计算能量，并返回用于优化的值
+    # 开始 Multi-Restart 循环
+    for trial_idx in range(args.restarts):
+        print(f"\n" + "="*60)
+        print(f"--- 实验 {trial_idx + 1}/{args.restarts} (Multi-Restart) ---")
+        print(f"随机种子: {args.random_seed + trial_idx}")
+        np.random.seed(args.random_seed + trial_idx)
         
-        Args:
-            params: 变分参数数组
-            
-        Returns:
-            float: CVaR能量值（优化目标）
-        """
-        # 将参数绑定到量子电路
-        bound_circ = transpiled_circuit.assign_parameters(params)
-        
-        # 在选定的后端上执行量子电路
-        job = backend.run(bound_circ, shots=args.shots)
-        
-        # 获取量子测量结果
-        counts = job.result().get_counts()
-        
-        # 计算实际消耗的 shots 数
-        actual_shots = sum(counts.values())
-        
-        # 使用CVaR策略计算能量（与原始版本一致，更稳定）
-        energy = calculate_cvar_energy(counts, qubit_op, args.alpha)
-        
-        # 同时提取多个最优结果用于后续分析
-        top_results = extract_top_results(counts, qubit_op, args.max_results)
-        top_energies = [result[1] for result in top_results]
-        
-        # 记录收敛历史和shots数，用于分析优化过程
-        convergence_history.append(energy)
-        iteration_shots_history.append(actual_shots)  # 记录每次迭代的实际shots数
-        # 使用实际消耗的 shots 数进行累加
-        if cumulative_shots_history:
-            cumulative_shots_history.append(cumulative_shots_history[-1] + actual_shots)
-        else:
-            cumulative_shots_history.append(actual_shots)
-        
-        # 记录每次迭代的多个最优结果的能量值
-        all_top_energies.append(top_energies)
-        
-        # 每隔一次迭代打印一次进度（避免过多输出）
-        if len(convergence_history) % 2 == 0:
-            print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}, 实际shots = {actual_shots}")
-            print(f"    各最优结果能量: {[round(e, 4) for e in top_energies]}")
-        
-        # 为最优结果之一生成蛋白质结构信息（仅用于迭代信息）
-        protein_structure_info = {}
-        if top_results:
-            # 使用能量最低的结果来生成蛋白质结构
-            best_bitstring, best_energy, best_count = top_results[0]
-            
-            # 创建模拟结果对象
-            class MockResult:
-                def __init__(self, bs, val, counts, total):
-                    # 设置最高概率比特串的振幅为1（理想情况）
-                    self.eigenstate = {bs: 1.0}
-                    # 设置优化得到的能量值
-                    self.eigenvalue = val
-                    # 提供完整的概率分布用于后续分析
-                    self.probabilities = {k[::-1]: v/total for k, v in counts.items()}
-            
-            # 创建模拟结果并解析为蛋白质结构
-            raw_res = MockResult(best_bitstring, best_energy, counts, actual_shots)
+        # 加载 Warm-Start 初始参数 (如果指定)
+        if args.initial_params:
             try:
-                result = problem.interpret(raw_res)
-                
-                # 获取XYZ坐标数据
-                xyz_data = result.protein_shape_file_gen.get_xyz_data()
-                
-                protein_structure_info = {
-                    "turn_sequence": result.turn_sequence if hasattr(result, 'turn_sequence') else "",
-                    "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None else [],
-                    "best_bitstring": best_bitstring
-                }
+                with open(args.initial_params, 'r') as f:
+                    params_data = json.load(f)
+                    args.initial_point = np.array(params_data['initial_point'])
+                    print(f"✓ 已加载 Warm-Start 参数向量 (维度: {len(args.initial_point)})")
             except Exception as e:
-                print(f"    ⚠ 迭代 {len(convergence_history)} 蛋白质结构解析失败: {e}")
-                protein_structure_info = {
-                    "turn_sequence": "",
-                    "xyz_coordinates": [],
-                    "best_bitstring": best_bitstring
-                }
+                print(f"⚠ 加载初始参数失败: {e}，将使用随机初始化")
+                args.initial_point = None
+        else:
+            args.initial_point = None
         
-        # 保存所有结果用于后续分析
-        iteration_data = {
-            "iteration": len(convergence_history),
-            "cvar_energy": energy,
-            "top_energies": top_energies,
-            "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
-            "total_counts": len(counts),
-            "actual_shots": actual_shots,
-            "protein_structure": protein_structure_info
-        }
-        iteration_results.append(iteration_data)
+        trial_dir = os.path.join(RESULT_DIR, f"trial_{trial_idx + 1}")
+        os.makedirs(trial_dir, exist_ok=True)
         
-        # 立即保存当前迭代的结果到单独的文件
-        iteration_result_path = os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json')
-        with open(iteration_result_path, 'w') as f:
-            # 处理top_results使其可JSON序列化
-            serializable_data = {
-                "iteration": iteration_data["iteration"],
-                "cvar_energy": iteration_data["cvar_energy"],
-                "top_energies": [float(e) for e in iteration_data["top_energies"]],
-                "top_results": [
-                    {"bitstring": r[0], "energy": float(r[1]), "count": r[2]}
-                    for r in iteration_data["top_results"]
-                ],
-                "total_counts": iteration_data["total_counts"],
-                "actual_shots": iteration_data["actual_shots"],
-                "protein_structure": iteration_data["protein_structure"]
-            }
-            json.dump(serializable_data, f, indent=2)
+        convergence_history = []
+        std_history = [] 
+        cumulative_shots_history = []  
+        iteration_shots_history = []  
+        iteration_results = []  
+        all_top_energies = []
         
-        return energy
+        iteration_result_dir = os.path.join(trial_dir, "iter_all_results")
+        os.makedirs(iteration_result_dir, exist_ok=True)
 
-    # 开始优化 (使用 COBYLA)
-    initial_params = np.random.uniform(-np.pi, np.pi, ansatz.num_parameters)
-    res = minimize(objective_function, initial_params, method='COBYLA', 
-                   options={'maxiter': args.max_optimization_iterations})
+        def objective_function(params):
+            """
+            优化目标函数
+            该函数接受参数，执行量子电路，使用CVaR策略计算能量，并返回用于优化的值
+            """
+            # 执行量子电路
+            current_shots = args.shots
+            if args.adaptive_shots:
+                max_iter = args.max_optimization_iterations
+                current_iter = len(convergence_history)
+                if max_iter > 1:
+                    ratio = min(current_iter / (max_iter - 1), 1.0)
+                    current_shots = int(args.min_shots + (args.max_shots - args.min_shots) * ratio)
+
+            if sampler_v2:
+                job = sampler_v2.run([(transpiled_circuit, params)], shots=current_shots)
+            else:
+                bound_circ = transpiled_circuit.assign_parameters(params)
+                job = backend.run(bound_circ, shots=current_shots)
+            
+            # 记录 Job ID
+            JobRecorder.record_job(job, trial_dir, label=f"sampler_step_{len(convergence_history)+1}")
+            
+            if sampler_v2:
+                result = job.result()[0]
+                data_name = 'meas' if 'meas' in result.data else next(iter(result.data))
+                counts = result.data[data_name].get_counts()
+            else:
+                counts = job.result().get_counts()
+            
+            actual_shots = sum(counts.values())
+            energy = calculate_cvar_energy(counts, qubit_op, args.alpha)
+            
+            # 计算标准差
+            energies_std = [estimate_energy_from_bitstring(bs, qubit_op) for bs in counts.keys()]
+            weights_std = [counts[bs] for bs in counts.keys()]
+            mean_std = np.average(energies_std, weights=weights_std) if energies_std else 0
+            std_e = np.sqrt(np.average((np.array(energies_std) - mean_std)**2, weights=weights_std)) if energies_std else 0
+            std_history.append(std_e)
+            
+            top_results = extract_top_results(counts, qubit_op, max(args.max_results * 5, 20) if args.unique_structures else args.max_results)
+            top_energies = [result[1] for result in top_results]
+            
+            convergence_history.append(energy)
+            iteration_shots_history.append(actual_shots)
+            cumulative_shots_history.append((cumulative_shots_history[-1] if cumulative_shots_history else 0) + actual_shots)
+            all_top_energies.append(top_energies)
+            
+            if len(convergence_history) % 2 == 0:
+                print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}, 实际shots = {actual_shots}")
+            
+            iteration_data = {
+                "iteration": len(convergence_history),
+                "cvar_energy": energy,
+                "top_energies": top_energies,
+                "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
+                "total_counts": len(counts),
+                "actual_shots": actual_shots,
+                "counts": counts, # 完整计数以供后续分析
+                "protein_structure": {"best_bitstring": top_results[0][0] if top_results else ""}
+            }
+            iteration_results.append(iteration_data)
+            
+            # 保存单轮迭代
+            with open(os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json'), 'w') as f:
+                json.dump({"iteration": iteration_data["iteration"], "cvar_energy": energy, "top_results": [{"bitstring": r[0], "energy": r[1]} for r in iteration_data["top_results"]]}, f, indent=2)
+            
+            return energy
+
+        # 5. 执行优化计算
+        print(f"   初始参数已生成，维度: {ansatz.num_parameters}")
+        initial_params = np.random.uniform(-np.pi, np.pi, ansatz.num_parameters)
+        
+        if args.optimizer.upper() == 'SPSA':
+            optimizer = SPSA(maxiter=args.max_optimization_iterations)
+            result = optimizer.minimize(objective_function, initial_params)
+            res = type('obj', (object,), {'x': result.x, 'fun': result.fun})
+        else:
+            method = 'COBYLA' if args.optimizer.upper() == 'COBYLA' else 'SLSQP'
+            res = minimize(objective_function, initial_params, method=method, options={'maxiter': args.max_optimization_iterations})
+        
+        print(f"  [优化结束] 最低能量: {res.fun:.4f}")
+        
+        for iter_data in iteration_results:
+            for cand in iter_data.get("top_results", []): global_candidates.append(cand)
+
+        if best_results_tuple is None or res.fun < best_energy:
+            best_energy = res.fun
+            best_trial_idx = trial_idx + 1
+            best_results_tuple = (res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history)
+            print(f"  ★ 发现新最佳实验: {best_trial_idx} (能量: {best_energy:.4f})")
+            
+        print(f"  [实验 {trial_idx + 1} 结束] 当前最佳能量: {best_energy:.4f}")
+
+
+    # ====================
+    # 全局分析与去重 (Global Analysis)
+    # ====================
+    print(f"\n" + "="*60)
+    print(f"所有实验结束。最佳实验: {best_trial_idx} (能量: {best_energy:.4f})")
+    print(f"正在进行跨运行结果汇总与去重...")
     
-    # 添加CVaR能量收敛曲线
-    all_conv_data.append({'counts': list(range(len(convergence_history))), 'values': convergence_history, 'cumulative_shots': cumulative_shots_history.copy(), 'label': 'CVaR Energy'})
+    # 解包最佳结果供可视化
+    res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history = best_results_tuple
     
-    # 添加每个最优结果的收敛曲线
+    # 汇总去重逻辑
+    unique_candidates = {}
+    for bs, en, count in global_candidates:
+        if bs not in unique_candidates or en < unique_candidates[bs][0]:
+            unique_candidates[bs] = (en, count)
+    
+    sorted_candidates = sorted(unique_candidates.items(), key=lambda x: x[1][0])
+    
+    if args.unique_structures:
+        print(f"    - 正在执行跨运行结构去重 (目标: {args.max_results} 个不同结构)...")
+        final_top_results = []
+        seen_structures = set()
+        
+        for bitstring, (energy, count) in sorted_candidates:
+            try:
+                # 临时解析结构用于去重
+                # 注意：此时 total_shots 并不重要，只为了解析结构
+                temp_mock_result = MockResult({bitstring: 1.0}, energy, {bitstring: count}, 100)
+                temp_result = problem.interpret(temp_mock_result)
+                structure_sig = str(temp_result.turn_sequence)
+                
+                if structure_sig not in seen_structures:
+                    seen_structures.add(structure_sig)
+                    final_top_results.append((bitstring, energy, count))
+                    
+                if len(final_top_results) >= args.max_results:
+                    break
+            except Exception as e:
+                print(f"    ⚠ 解析比特串 {bitstring} 失败: {e}")
+                continue
+    else:
+        final_top_results = [(bs, en, count) for bs, (en, count) in sorted_candidates[:args.max_results]]
+
+    # 准备可视化数据
+    all_conv_data = [{
+        'counts': list(range(len(convergence_history))), 
+        'values': convergence_history, 
+        'stds': std_history,
+        'cumulative_shots': cumulative_shots_history, 
+        'label': f'Best Trial ({best_trial_idx})'
+    }]
+    
+    # 原有的 all_top_energies 可视化 (来自最佳 Trial)
     if all_top_energies:
-        for i in range(args.max_results):
-            # 提取第i个最优结果的能量值
+        for i in range(min(args.max_results, len(all_top_energies[0]))):
             top_i_energies = [energies[i] if i < len(energies) else None for energies in all_top_energies]
-            # 过滤掉None值
             valid_counts = []
             valid_energies = []
             for j, energy in enumerate(top_i_energies):
                 if energy is not None:
                     valid_counts.append(j)
                     valid_energies.append(energy)
-            # 添加到all_conv_data
-            all_conv_data.append({'counts': valid_counts, 'values': valid_energies, 'cumulative_shots': cumulative_shots_history[:len(valid_counts)], 'label': f'Top {i+1} Energy'})
+            all_conv_data.append({
+                'counts': valid_counts, 
+                'values': valid_energies, 
+                'label': f'Trial {best_trial_idx} Top {i+1} Energy'
+            })
 
     # --- 结果解析与保存 ---
-    print(f"    - 正在分析最优结果...")
+    print(f"    - 正在保存最终结果到 {RESULT_DIR}...")
     
-    # 使用最优参数生成最终量子电路并执行测量
-    final_bound_circuit = transpiled_circuit.assign_parameters(res.x)
-    final_job = backend.run(final_bound_circuit, shots=args.shots)
-    final_counts = final_job.result().get_counts()
-    total_shots = sum(final_counts.values())
+    # 查找最佳实验的最终计数，用于 MockResult (虽然主要用于展示分布)
+    final_counts = {}
+    if iteration_results:
+        # 获取最佳实验最后一次迭代的 counts
+        final_counts = iteration_results[-1].get("counts", {})
+    total_shots = sum(final_counts.values()) if final_counts else args.shots
     
-    # 提取能量最低的多个最优结果
-    final_top_results = extract_top_results(final_counts, qubit_op, args.max_results)
-    total_shots = sum(final_counts.values())
-    
-    # 处理迭代结果，只保存必要的信息以减少文件大小
+    # 将迭代结果转换为可序列化格式
     processed_iteration_results = []
     for iter_data in iteration_results:
-        # 处理top_results，确保所有值都是可JSON序列化的
-        processed_top_results = []
-        for top_result in iter_data.get("top_results", []):
-            processed_result = {
-                "bitstring": top_result[0],
-                "energy": float(top_result[1]),
-                "count": top_result[2]
-            }
-            processed_top_results.append(processed_result)
-        
-        processed_iter = {
+        processed_top_results = [
+            {"bitstring": r[0], "energy": float(r[1]), "count": r[2]}
+            for r in iter_data.get("top_results", [])
+        ]
+        processed_iteration_results.append({
             "iteration": iter_data["iteration"],
             "cvar_energy": iter_data["cvar_energy"],
             "top_energies": [float(e) for e in iter_data.get("top_energies", [])],
             "top_results": processed_top_results,
             "total_counts": iter_data.get("total_counts", 0),
             "actual_shots": iter_data.get("actual_shots", 0)
-        }
-        processed_iteration_results.append(processed_iter)
+        })
     
     # 为每个最优结果生成蛋白质结构和文件
     for idx, (bitstring, energy, count) in enumerate(final_top_results):
         print(f"\n    - 结果 {idx+1}/{args.max_results}: 能量 = {energy:.4f}, 出现次数 = {count}")
         
-        # 创建模拟结果对象
-        class MockResult:
-            def __init__(self, bs, val, counts, total):
-                # 设置最高概率比特串的振幅为1（理想情况）
-                self.eigenstate = {bs: 1.0}
-                # 设置优化得到的能量值
-                self.eigenvalue = val                                                                                                       
-                # 提供完整的概率分布用于后续分析
-                self.probabilities = {k[::-1]: v/total for k, v in counts.items()}
-        
-        # 创建模拟结果并解析为蛋白质结构
-        raw_res = MockResult(bitstring, energy, final_counts, total_shots)
+        # 使用全局定义的 MockResult 级解析蛋白质结构
+        raw_res = MockResult({bitstring: 1.0}, energy, final_counts, total_shots)
         result = problem.interpret(raw_res)
         
         print(f"    - 转向序列: {result.turn_sequence}")
@@ -603,8 +670,14 @@ def main():
             label = data.get('label', f'Run {idx+1}')
             # CVaR Energy 使用虚线，其他使用实线
             if 'CVaR' in label:
-                line, = ax1.plot(data['counts'], data['values'], marker='o', label=label, 
+                values = np.array(data['values'])
+                line, = ax1.plot(data['counts'], values, marker='o', label=label, 
                          linewidth=3, color=color, linestyle='--')
+                # 绘制误差带
+                stds = np.array(data.get('stds', []))
+                if len(stds) == len(values):
+                     ax1.fill_between(data['counts'], values - stds, values + stds, 
+                                      color=color, alpha=0.2, label=f'{label} Std Range')
             else:
                 line, = ax1.plot(data['counts'], data['values'], marker='o', label=label, 
                          linewidth=3, color=color)
@@ -633,6 +706,32 @@ def main():
         plt.savefig(os.path.join(RESULT_DIR, "vqe_sampler_optimization_with_shots.png"))
         plt.close()
         print(f"✓ 带shots信息的VQE采样器优化图已保存为 {os.path.join(RESULT_DIR, 'vqe_sampler_optimization_with_shots.png')}")
+    
+    print(f"\n✓ 蛋白质折叠计算完成！")
+    
+    # 导出最优参数向量（供 Warm-Start 使用）
+    try:
+        print(f"\n正在导出最优参数向量...")
+        # 从最佳实验的优化结果中获取最优参数
+        if res is not None and hasattr(res, 'x'):
+            best_params = res.x
+            best_params_file = os.path.join(RESULT_DIR, "best_params.json")
+            with open(best_params_file, 'w') as f:
+                json.dump({
+                    "initial_point": best_params.tolist(),
+                    "energy": best_energy,
+                    "num_parameters": len(best_params),
+                    "best_trial": best_trial_idx
+                }, f, indent=2)
+            print(f"✓ 最优参数已保存到: {best_params_file}")
+            print(f"  - 参数维度: {len(best_params)}")
+            print(f"  - 最优能量: {best_energy:.4f}")
+            print(f"  - 最佳实验: Trial {best_trial_idx}")
+            print(f"  提示: 可使用 --initial_params {best_params_file} 进行 Warm-Start")
+        else:
+            print(f"⚠ 无法找到最优参数，跳过导出")
+    except Exception as e:
+        print(f"⚠ 导出最优参数时出错: {e}")
     
     print(f"\n🎉 蛋白质折叠计算任务完成！所有结果保存在: {RESULT_DIR}")
 

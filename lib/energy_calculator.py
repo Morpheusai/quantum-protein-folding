@@ -52,6 +52,9 @@ class EnergyCalculator:
         # 将比特串反转，使其与哈密顿量的索引顺序对应
         bit_list = [int(b) for b in reversed(bitstring)]
         
+        if len(bitstring) != qubit_op.num_qubits:
+             raise ValueError(f"比特串长度 ({len(bitstring)}) 与哈密顿量量子比特数 ({qubit_op.num_qubits}) 不匹配")
+
         # 遍历哈密顿量的每一项 (Pauli算子及其系数)
         for pauli_str, coeff in qubit_op.to_list():
             val = 1.0
@@ -103,6 +106,38 @@ class EnergyCalculator:
         
         # 返回最低能量样本的平均值
         return np.mean(energies[:num_keep])
+    
+    @staticmethod
+    def calculate_energy_std(counts, qubit_op):
+        """
+        计算能量分布的标准差
+        
+        Args:
+            counts (dict): 量子测量结果的字典 {bitstring: count}
+            qubit_op: 量子比特哈密顿量算子
+            
+        Returns:
+            float: 能量分布的标准差
+        """
+        energies = []
+        weights = []
+        
+        # 计算每个比特串的能量和权重
+        for bitstring, count in counts.items():
+            e = EnergyCalculator.estimate_energy_from_bitstring(bitstring, qubit_op)
+            energies.append(e)
+            weights.append(count)
+        
+        # 计算加权标准差
+        # 使用numpy的cov或手动计算var
+        # var = sum(w * (x - mean)^2) / sum(w)
+        if not energies:
+            return 0.0
+            
+        mean_energy = np.average(energies, weights=weights)
+        variance = np.average((np.array(energies) - mean_energy)**2, weights=weights)
+        
+        return np.sqrt(variance)
     
     @staticmethod
     def extract_top_results(counts, qubit_op, max_results=1):

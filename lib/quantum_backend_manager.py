@@ -131,7 +131,7 @@ class QuantumBackendManager:
             pass
     
     @staticmethod
-    def setup_backend(backend_name, aws_region=None, shots=100, use_estimator=True):
+    def setup_backend(backend_name, aws_region=None, shots=100, use_estimator=True, **kwargs):
         """
         设置量子后端
 
@@ -143,6 +143,7 @@ class QuantumBackendManager:
             aws_region (str, optional): AWS区域设置
             shots (int, optional): 量子采样次数，默认100
             use_estimator (bool, optional): 是否使用Estimator模式，默认True
+            resilience_level (int, optional): 误差抑制等级 (0-3)，默认1
 
         Returns:
             dict: 包含后端信息的字典，键包括：
@@ -166,17 +167,50 @@ class QuantumBackendManager:
         elif backend_name.lower().startswith('aws'):
             backend_info = QuantumBackendManager._setup_aws_backend(backend_name, aws_region, shots)
         elif backend_name.lower().startswith('ibm'):
-            backend_info = QuantumBackendManager._setup_ibm_backend(backend_name, shots)
+            # 传递 resilience_level 给 IBM 后端设置
+            resilience_level = kwargs.get('resilience_level', 1)
+            backend_info = QuantumBackendManager._setup_ibm_backend(backend_name, shots, resilience_level)
         else:
             raise ValueError(f"不支持的量子后端: {backend_name}")
         
-        if use_estimator and 'backend' in backend_info:
+        if use_estimator:
             try:
-                from qiskit.primitives import StatevectorEstimator
-                backend_info['estimator'] = StatevectorEstimator()
+                # 尝试使用 resilience_level 初始化 Estimator (针对支持它的后端/Primitive)
+                # 目前 qiskit.primitives.StatevectorEstimator 不接受 resilience_level，
+                # 但如果是 IBM Runtime 的 EstimatorV2 则需要。
+                # 这里为了兼容性，我们主要针对 IBM Runtime 做特殊处理，通用 Estimator 保持默认。
+                
+                if backend_info.get('type') == 'ibm':
+                     # IBM Runtime 的 Estimator 会在 _setup_ibm_backend 中处理，或者需要在这里重新封装
+                     # 由于 _setup_ibm_backend 主要是获取 backend 对象，我们在这里尝试创建 Estimator
+                     # 注意：如果是使用 primitives V2，通常是在此时创建
+                     pass
+                
+                # 对于本地模拟，继续使用 StatevectorEstimator 作为基础
+                if 'estimator' not in backend_info: # 如果后端设置没创建 estimator
+                    from qiskit.primitives import StatevectorEstimator
+                    backend_info['estimator'] = StatevectorEstimator()
+
             except Exception as e:
                 print(f"警告: 无法创建Estimator: {e}")
                 backend_info['estimator'] = None
+        
+        # 尝试创建 SamplerV2 (用于现代化迁移)
+        try:
+            if backend_info.get('type') == 'local':
+                from qiskit.primitives import StatevectorSampler
+                backend_info['sampler_v2'] = StatevectorSampler()
+                print(f"✓ 已配置本地 SamplerV2 (StatevectorSampler)")
+            elif backend_info.get('type') == 'ibm':
+                from qiskit_ibm_runtime import SamplerV2 as IBMSampler
+                sampler = IBMSampler(mode=backend_info['backend'])
+                backend_info['sampler_v2'] = sampler
+                print(f"✓ 已配置 IBM SamplerV2 (支持现代化 Error Mitigation)")
+            else:
+                backend_info['sampler_v2'] = None
+        except Exception as e:
+            print(f"提示: 无法初始化 SamplerV2 ({e})，将使用传统接口")
+            backend_info['sampler_v2'] = None
         
         return backend_info
     
@@ -224,7 +258,26 @@ class QuantumBackendManager:
             backend = provider.get_backend(backend_config['name'])
             print(f"✓ {backend_config['display']} 已连接")
             
-            QuantumBackendManager._check_device_status(backend)
+            print(f"✓ {backend_config['display']} 已连接")
+            
+            # 增加重试机制检查设备状态
+            max_retries = 3
+            import time
+            for attempt in range(max_retries):
+                try:
+                    QuantumBackendManager._check_device_status(backend)
+                    break
+                except ValueError as ve:
+                    if attempt < max_retries - 1:
+                        print(f"⚠ 设备检查失败 (尝试 {attempt+1}/{max_retries}): {ve}")
+                        print("  正在等待 5 秒后重试...")
+                        time.sleep(5)
+                    else:
+                        raise ve
+                except Exception as e:
+                    print(f"⚠ 设备检查遇到未知错误: {e}")
+                    # 非状态错误通常不重试或根据情况处理
+                    break
             
             backend_info['backend'] = backend
             backend_info['type'] = 'aws'
@@ -252,7 +305,7 @@ class QuantumBackendManager:
         return backend_info
     
     @staticmethod
-    def _setup_ibm_backend(backend_name, shots):
+    def _setup_ibm_backend(backend_name, shots, resilience_level=1):
         """设置IBM Quantum后端"""
         backend_info = {}
         
@@ -290,6 +343,21 @@ class QuantumBackendManager:
             backend_info['type'] = 'ibm'
             backend_info['name'] = backend.name
             backend_info['shots'] = shots
+
+            # 尝试为 IBM 后端创建带误差抑制的 Estimator
+            try:
+                from qiskit_ibm_runtime import EstimatorV2 as IBMEstimator
+                
+                # EstimatorV2 配置
+                estimator = IBMEstimator(mode=backend)
+                estimator.options.resilience_level = resilience_level
+                backend_info['estimator'] = estimator
+                print(f"✓ IBM EstimatorV2 已配置 (误差抑制等级: {resilience_level})")
+            except ImportError:
+                 print("⚠ qiskit_ibm_runtime.EstimatorV2 不可用，将使用标准 Estimator")
+            except Exception as e:
+                 print(f"⚠ 配置 IBM Estimator 失败: {e}")
+
             
         except Exception as e:
             QuantumBackendManager._print_error(

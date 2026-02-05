@@ -19,6 +19,7 @@ import argparse
 import os
 import sys
 import warnings
+import json
 
 # 设置路径和编码环境
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +48,8 @@ from lib.quantum_backend_manager import QuantumBackendManager
 from lib.protein_folding_builder import ProteinFoldingBuilder
 from lib.result_handler import ResultHandler
 from lib.quantum_optimizer import QuantumOptimizer
+import inspect
+print(f"DEBUG: QuantumOptimizer file: {inspect.getfile(QuantumOptimizer)}")
 from lib.job_metadata_logger import JobMetadataLogger
 
 # =============================================================================
@@ -63,12 +66,21 @@ parser.add_argument('--penalty_back', type=float, default=10, help='几何约束
 parser.add_argument('--penalty_chiral', type=float, default=10, help='手性约束惩罚系数')
 parser.add_argument('--penalty_local_overlap', type=float, default=10, help='局部重叠惩罚系数')
 parser.add_argument('--shots', type=int, default=100, help='量子采样次数')
-parser.add_argument('--max_results', type=int, default=1, help='最大结果数量')
+parser.add_argument('--dry_run', action='store_true', help='干跑模式：仅在真实提交前进行本地预检')
+parser.add_argument('--restarts', type=int, default=1, help='多重启实验次数 (Multi-Restart)')
+parser.add_argument('--max_results', type=int, default=5, help='最终展示的最大不同结构数量')
+parser.add_argument('--unique_structures', action='store_true', default=True, help='是否执行全局结构去重')
+parser.add_argument('--adaptive_shots', action='store_true', help='是否启用自适应精度/采样')
+parser.add_argument('--max_shots', type=int, default=1000, help='自适应采样最大值')
 parser.add_argument('--aws_region', default=None, help='AWS区域')
+parser.add_argument('--optimizer', default='COBYLA', help='优化器选择: COBYLA (默认), SPSA, SLSQP')
+parser.add_argument('--resilience_level', type=int, default=1, help='IBM Quantum 误差抑制等级 (0-3)，默认1')
+parser.add_argument('--resume', type=str, default=None, help='断点续传：指定结果目录以恢复历史任务')
+parser.add_argument('--initial_params', type=str, default=None, help='Warm-Start：从 JSON 文件加载初始参数向量')
 args = parser.parse_args()
 
 
-def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
+def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, result_dir=None, problem=None, sampler=None):
     """
     执行单次VQE迭代
     
@@ -78,11 +90,17 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None):
         optimizer: 优化器
         estimator: 量子估算器
         backend: 量子后端（可选）
+        result_dir: 结果目录（可选，用于保存每步迭代结果）
+        problem: 蛋白质折叠问题对象（可选）
+        sampler: 量子采样器（可选）
         
     Returns:
         tuple: (VQE结果, 收敛数据字典)
     """
-    return QuantumOptimizer.create_vqe_optimizer(qubit_op, ansatz, optimizer, estimator, backend, args)
+    return QuantumOptimizer.create_vqe_optimizer(
+        qubit_op, ansatz, optimizer, estimator, backend, args, 
+        result_dir=result_dir, problem=problem, sampler=sampler
+    )
 
 
 # 初始化作业元数据记录器
@@ -113,12 +131,27 @@ def main():
     print(f"  - 局部重叠惩罚: {args.penalty_local_overlap}")
     print(f"  - 量子采样次数: {args.shots}")
     print(f"  - 最大结果数量: {args.max_results}")
+    print(f"  - 优化器: {args.optimizer}")
+    print(f"  - 误差抑制等级: {args.resilience_level}")
 
     # =========================================================================
     # 2. 初始化设置
     # =========================================================================
     algorithm_globals.random_seed = args.random_seed
     print("✓ 随机种子设置完成")
+
+    # 加载 Warm-Start 初始参数 (如果指定)
+    if args.initial_params:
+        try:
+            with open(args.initial_params, 'r') as f:
+                params_data = json.load(f)
+                args.initial_point = np.array(params_data['initial_point'])
+                print(f"✓ 已加载 Warm-Start 参数向量 (维度: {len(args.initial_point)})")
+        except Exception as e:
+            print(f"⚠ 加载初始参数失败: {e}，将使用随机初始化")
+            args.initial_point = None
+    else:
+        args.initial_point = None
 
     # =========================================================================
     # 3. 构建蛋白质折叠问题
@@ -138,8 +171,18 @@ def main():
     # 4. 配置量子后端和优化器
     # =========================================================================
     print(f"\n正在配置量子后端...")
-    backend_info = QuantumBackendManager.setup_backend(args.backend, args.aws_region, args.shots, use_estimator=True)
-    optimizer = COBYLA(maxiter=args.max_optimization_iterations)
+    backend_info = QuantumBackendManager.setup_backend(args.backend, args.aws_region, args.shots, use_estimator=True, resilience_level=args.resilience_level)
+    
+    # 根据参数创建优化器
+    if args.optimizer.upper() == 'SPSA':
+        from qiskit_algorithms.optimizers import SPSA
+        optimizer = SPSA(maxiter=args.max_optimization_iterations)
+    elif args.optimizer.upper() == 'SLSQP':
+        from qiskit_algorithms.optimizers import SLSQP
+        optimizer = SLSQP(maxiter=args.max_optimization_iterations)
+    else:
+        optimizer = COBYLA(maxiter=args.max_optimization_iterations)
+        
     print("✓ 优化器设置完成")
     print(f"  - 使用优化器: {type(optimizer).__name__}")
     print(f"  - 最大迭代次数: {args.max_optimization_iterations}")
@@ -160,122 +203,167 @@ def main():
     print(f"  - 结果目录: {result_dir}")
 
     all_conv_data = []
+    global_candidates = [] # [(bitstring, energy, restart_index)]
 
     # =========================================================================
-    # 7. 执行多轮VQE优化
+    # 7. 执行多轮VQE优化 (Multi-Restart)
     # =========================================================================
-    print(f"\n正在计算最多 {args.max_results} 个最优结果...")
-    print(f"  - 量子采样次数: {args.shots}")
+    print(f"\n正在执行 {args.restarts} 轮独立实验 (Multi-Restart)...")
+    print(f"  - 每轮量子基础采样次数: {args.shots}")
+    if args.adaptive_shots:
+        print(f"  - 已启用自适应采样: {args.min_shots} -> {args.max_shots}")
     
-    for i in range(args.max_results):
-        print(f"  - 正在计算第 {i+1}/{args.max_results} 个结果...")
+    best_overall_energy = float('inf')
+    best_restart_idx = -1
+
+    for i in range(args.restarts):
+        print(f"\n============================================================")
+        print(f"--- 实验 {i+1}/{args.restarts} (Multi-Restart) ---")
         algorithm_globals.random_seed = args.random_seed + i
-        
-        print(f"    - 当前随机种子: {algorithm_globals.random_seed}")
+        print(f"随机种子: {algorithm_globals.random_seed}")
         
         # 7.1 执行VQE迭代
+        # 为每轮实验创建子目录
+        trial_dir = os.path.join(result_dir, f"trial_{i+1}")
+        os.makedirs(trial_dir, exist_ok=True)
+        
         raw_result, conv_data = run_vqe_iteration(
             qubit_op, base_ansatz, optimizer, 
-            backend_info['estimator'], backend_info.get('backend')
+            backend_info['estimator'], backend_info.get('backend'),
+            result_dir=trial_dir, problem=problem, sampler=backend_info.get('sampler_v2')
         )
+        
         # 设置结果标签
-        conv_data['label'] = f'run{i+1}'
+        trial_label = f'Trial {i+1}'
+        conv_data['label'] = trial_label
         all_conv_data.append(conv_data)
         
-        # 7.2 分析最优参数并提取蛋白质结构
-        print(f"    - 正在分析最优参数以提取蛋白质结构...")
+        current_energy = float(raw_result.eigenvalue)
+        print(f"  [优化结束] 能量: {current_energy:.4f}")
+        
+        if current_energy < best_overall_energy:
+            best_overall_energy = current_energy
+            best_restart_idx = i + 1
+            print(f"  ★ 发现新最佳实验: {i+1} (能量: {current_energy:.4f})")
+
+        # 7.2 收集候选结构 (从 VQE 收敛过程中的 parameters 还原得到)
+        # 我们可以选取该轮实验中的最佳点，也可以选取 all_params 中的高质量点
+        print(f"    - 正在从最优参数还原结构候选...")
         try:
-            best_circuit = base_ansatz.assign_parameters(raw_result.optimal_point)
+            # 获取该轮最佳候选和对应的 Ansatz
+            trial_ansatz = conv_data.get('ansatz', base_ansatz)
+            best_params_dict = conv_data.get('best_params_dict')
+            
+            # 使用正确的 Ansatz 和参数字典获取该参数下的 bitstrings
+            if best_params_dict:
+                best_circuit = trial_ansatz.assign_parameters(best_params_dict)
+            else:
+                best_params = conv_data.get('best_params', raw_result.optimal_point)
+                best_circuit = trial_ansatz.assign_parameters(best_params)
             
             is_simulator = args.backend.lower() in ['local', 'aws_sv1', 'ibm_simulator']
-            
             if is_simulator or backend_info.get('backend') is None:
-                # 模拟器模式：使用Statevector直接计算概率分布
-                raw_result.eigenstate = Statevector.from_instruction(best_circuit).probabilities_dict()
-                print(f"    - 通过模拟还原概率分布成功")
+                probs = Statevector.from_instruction(best_circuit).probabilities_dict()
+                # 选取概率最高的一个或多个
+                top_bitstring = max(probs, key=probs.get)
+                global_candidates.append((top_bitstring, current_energy, i+1))
             else:
-                # 真实硬件模式：通过采样获取概率分布
-                print(f"    - 正在通过真实量子硬件采样...")
-                meas_circuit = transpile(best_circuit, backend=backend_info['backend'],
-                                       initial_layout=list(range(best_circuit.num_qubits)) if args.backend not in ['local', 'aws_sv1', 'ibm_simulator'] else None,
-                                       optimization_level=3)
-                print(f"   结果电路转译: 逻辑比特数={meas_circuit.num_qubits}, 物理比特数={meas_circuit.width()}")
+                # 硬件采样
+                meas_circuit = transpile(best_circuit, backend=backend_info['backend'], optimization_level=3)
                 meas_circuit.measure_all()
-                
                 sampler = BackendSamplerV2(backend=backend_info['backend'])
-                job = sampler.run([meas_circuit], shots=args.shots)
+                job = sampler.run([meas_circuit], shots=max(100, args.shots))
                 sampler_res = job.result()[0]
-                
-                reg_name = list(sampler_res.data.keys())[0]
-                counts = getattr(sampler_res.data, reg_name).get_counts()
-                total_shots = sum(counts.values())
-                raw_result.eigenstate = {k: v/total_shots for k, v in counts.items()}
-                print(f"    - 硬件采样完成，共 {total_shots} 次测量")
+                counts = getattr(sampler_res.data, list(sampler_res.data.keys())[0]).get_counts()
+                top_bitstring = max(counts, key=counts.get)
+                global_candidates.append((top_bitstring, current_energy, i+1))
         except Exception as e:
-            print(f"    - 概率分布还原失败: {e}")
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
+            print(f"    ⚠ 提取候选结构失败: {e}")
+
+    # =========================================================================
+    # 8. 全局汇总与结构去重
+    # =========================================================================
+    print(f"\n============================================================")
+    print(f"所有实验结束。最佳实验: {best_restart_idx} (能量: {best_overall_energy:.4f})")
+    print(f"正在进行跨运行结果汇总与去重...")
+    
+    # 按能量排序
+    global_candidates.sort(key=lambda x: x[1])
+    
+    final_top_results = []
+    seen_structures = set()
+    
+    # 结构去重核心循环
+    for bitstring, energy, restart_idx in global_candidates:
+        if len(final_top_results) >= args.max_results:
+            break
+            
+        if args.unique_structures:
+            try:
+                # 快速验证结构唯一性
+                # 使用 MockResult 类来利用 problem.interpret 进行去重
+                from lib.quantum_optimizer import MockQuantumResult
+                temp_res = MockQuantumResult({bitstring: 1.0}, energy, {bitstring: 1}, 1)
+                interpreted = problem.interpret(temp_res)
+                struct_key = interpreted.turn_sequence
+                
+                if struct_key not in seen_structures:
+                    seen_structures.add(struct_key)
+                    final_top_results.append((bitstring, energy, restart_idx, interpreted))
+            except Exception as e:
+                print(f"    ⚠ 结构分析失败: {e}")
+                continue
+        else:
+            final_top_results.append((bitstring, energy, restart_idx, None))
+
+    print(f"    - 完成。共找到 {len(final_top_results)} 个独特候选结构。")
+    print(f"    - 开始保存最终结果到 {result_dir}...")
+
+    # =========================================================================
+    # 9. 循环保存排名前 N 的独特结果
+    # =========================================================================
+    for idx, (bitstring, energy, restart_idx, result) in enumerate(final_top_results):
+        print(f"\n    - 结果 {idx+1}/{len(final_top_results)}: 能量 = {energy:.4f}, 来自实验 {restart_idx}")
         
-        print(f"    - 最优能量值: {raw_result.eigenvalue:.4f}")
+        if result is None:
+            # 如果之前的循环没完成解析，这里补上
+            from lib.quantum_optimizer import MockQuantumResult
+            temp_res = MockQuantumResult({bitstring: 1.0}, energy, {bitstring: 1}, 1)
+            result = problem.interpret(temp_res)
+
+        energy_str = f"{abs(energy):.4f}"
         
-        # 7.3 解析蛋白质结构
-        result = problem.interpret(raw_result)
-        print(f"    - 蛋白质结构解析完成")
-        protein_structure = "".join(result.protein_shape_file_gen.main_chain_aminoacid_list)
-        print(f"    - 蛋白质形状: {protein_structure}")
-        print(f"    - 蛋白质能量: {raw_result.eigenvalue:.4f}")
-        
-        # =====================================================================
-        # 8. 保存结果数据
-        # =====================================================================
-        
-        # 8.1 准备结果数据
+        # 准备结果字典
         xyz_data = result.protein_shape_file_gen.get_xyz_data()
         xyz_coords = [[str(row[0]), str(row[1]), str(row[2]), str(row[3])] for row in xyz_data]
-        energy_value = float(raw_result.eigenvalue)
-        energy_str = f"{abs(energy_value):.4f}"
         
-        # 8.2 保存JSON结果文件
-        result_filename = os.path.join(result_dir, f"result_{i+1}_energy_{energy_str}.json")
+        result_filename = os.path.join(result_dir, f"result_{idx+1}_energy_{energy_str}.json")
         result_dict = {
-            "result_index": i + 1,
-            "energy": energy_value,
+            "result_index": idx + 1,
+            "original_restart": restart_idx,
+            "energy": energy,
             "turn_sequence": result.turn_sequence,
-            "main_chain_sequence": protein_structure,
+            "main_chain_sequence": args.main_chain,
             "shots_requested": args.shots,
             "backend": args.backend,
-            "tries": args.max_optimization_iterations,
-            "optimizer": type(optimizer).__name__,
-            "penalty_back": args.penalty_back,
-            "penalty_chiral": args.penalty_chiral,
-            "penalty_local_overlap": args.penalty_local_overlap,
             "optimization_convergence": {
-                "evaluation_counts": conv_data['counts'],
-                "energy_values": conv_data['values'],
-                "cumulative_shots": conv_data['cumulative_shots']
+                "evaluation_counts": all_conv_data[restart_idx-1]['counts'],
+                "energy_values": all_conv_data[restart_idx-1]['values'],
+                "stds": all_conv_data[restart_idx-1].get('stds', [])
             },
             "xyz_coordinates": xyz_coords
         }
         ResultHandler.save_result(result_dict, result_filename)
-        print(f"    - 结果已保存到: {result_filename}")
         
-        # 8.3 生成PDB文件
-        try:
-            pdb_filename = os.path.join(result_dir, f"structure_{i+1}_energy_{energy_str}.pdb")
-            ResultHandler.convert_xyz_to_detailed_pdb(result.protein_shape_file_gen.get_xyz_data(), pdb_filename)
-            print(f"    - PDB文件已保存到: {pdb_filename}")
-        except Exception as e:
-            print(f"    - PDB文件生成失败: {e}")
+        # PDB
+        pdb_filename = os.path.join(result_dir, f"structure_{idx+1}_energy_{energy_str}.pdb")
+        ResultHandler.convert_xyz_to_detailed_pdb(xyz_data, pdb_filename)
         
-        # 8.4 生成蛋白质结构图
-        try:
-            structure_plot_filename = os.path.join(result_dir, f"structure_{i+1}_energy_{energy_str}.png")
-            ResultHandler.plot_protein_structure_3d(result, structure_plot_filename, 
-                                                              title=f"Result {i+1} (E={energy_value:.4f})")
-            print(f"    - 结构图已保存到: {structure_plot_filename}")
-        except Exception as e:
-            print(f"    - 结构图生成失败: {e}")
+        # PNG
+        png_filename = os.path.join(result_dir, f"structure_{idx+1}_energy_{energy_str}.png")
+        ResultHandler.plot_protein_structure_3d(result, png_filename, title=f"Result {idx+1} (E={energy:.4f})")
+        
+        print(f"    ✓ 已保存: JSON, PDB, PNG")
 
     # =========================================================================
     # 9. 生成可视化图表
@@ -303,6 +391,39 @@ def main():
         print(f"✓ VQE收敛曲线图已保存到: {convergence_with_shots_filename}")
     except Exception as e:
         print(f"⚠ 生成VQE收敛曲线图时出错: {e}")
+
+    # =========================================================================
+    # 10. 导出最优参数向量（供 Warm-Start 使用）
+    # =========================================================================
+    try:
+        print(f"\n正在导出最优参数向量...")
+        # 优先从 VQE 结果中直接获取最优参数（这是最准确的）
+        if hasattr(raw_result, 'optimal_point') and raw_result.optimal_point is not None:
+            best_params = raw_result.optimal_point
+        elif all_conv_data and 'best_params_dict' in all_conv_data[best_restart_idx - 1]:
+            # 如果只有参数字典，转换为数组
+            best_params_dict = all_conv_data[best_restart_idx - 1]['best_params_dict']
+            best_params = np.array(list(best_params_dict.values()))
+        elif all_conv_data and 'best_params' in all_conv_data[best_restart_idx - 1]:
+            # 最后才使用回调函数中的参数（可能不完整）
+            best_params = all_conv_data[best_restart_idx - 1]['best_params']
+        else:
+            raise ValueError("无法获取最优参数")
+        
+        best_params_file = os.path.join(result_dir, "best_params.json")
+        with open(best_params_file, 'w') as f:
+            json.dump({
+                "initial_point": best_params.tolist(),
+                "energy": best_overall_energy,
+                "optimizer": args.optimizer,
+                "num_parameters": len(best_params)
+            }, f, indent=2)
+        print(f"✓ 最优参数已保存到: {best_params_file}")
+        print(f"  - 参数维度: {len(best_params)}")
+        print(f"  - 最优能量: {best_overall_energy:.4f}")
+        print(f"  提示: 可使用 --initial_params {best_params_file} 进行 Warm-Start")
+    except Exception as e:
+        print(f"⚠ 导出最优参数时出错: {e}")
 
     print(f"\n✓ 所有任务完成！结果保存在: {result_dir}")
     

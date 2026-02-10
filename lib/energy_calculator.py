@@ -171,3 +171,60 @@ class EnergyCalculator:
         top_results = bitstring_energies[:max_results]
         
         return top_results
+    
+    @staticmethod
+    def calculate_cvar_energy_precise(counts, protein_sequence, interaction_matrix, turn2qubit, alpha=0.1):
+        """
+        使用精确哈密顿量计算 CVaR 能量
+        
+        Args:
+            counts (dict): 量子测量结果 {bitstring: count}
+            protein_sequence (str): 蛋白质序列
+            interaction_matrix (np.ndarray): 相互作用矩阵
+            turn2qubit (str): 转向到量子比特映射
+            alpha (float, optional): CVaR 参数，默认为 0.1
+            
+        Returns:
+            float: CVaR 能量值
+        """
+        from lib.precise_energy_calculator import PreciseEnergyCalculator
+        
+        calc = PreciseEnergyCalculator(protein_sequence, interaction_matrix)
+        
+        energies = []
+        for bitstring, count in counts.items():
+            e = calc.calculate_energy_from_bitstring(bitstring, turn2qubit)
+            energies.extend([e] * count)
+        
+        energies.sort()
+        total_shots = sum(counts.values())
+        num_keep = max(1, int(total_shots * alpha))
+        
+        return np.mean(energies[:num_keep])
+    
+    @staticmethod
+    def extract_top_results_precise(counts, protein_sequence, interaction_matrix, turn2qubit, max_results=1):
+        """
+        使用精确哈密顿量提取前 N 个最优结果
+        
+        Args:
+            counts (dict): 量子测量结果 {bitstring: count}
+            protein_sequence (str): 蛋白质序列
+            interaction_matrix (np.ndarray): 相互作用矩阵
+            turn2qubit (str): 转向到量子比特映射
+            max_results (int, optional): 要提取的最优结果数量，默认为 1
+            
+        Returns:
+            list: [(bitstring, energy, count), ...]
+        """
+        from lib.precise_energy_calculator import PreciseEnergyCalculator
+        
+        calc = PreciseEnergyCalculator(protein_sequence, interaction_matrix)
+        
+        bitstring_energies = []
+        for bitstring, count in counts.items():
+            e = calc.calculate_energy_from_bitstring(bitstring, turn2qubit)
+            bitstring_energies.append((bitstring, e, count))
+        
+        bitstring_energies.sort(key=lambda x: x[1])
+        return bitstring_energies[:max_results]

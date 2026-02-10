@@ -52,6 +52,7 @@ import json
 import datetime
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from typing import List, Tuple, Dict, Optional
 
 
@@ -544,3 +545,137 @@ class ResultHandler:
         )
         
         generator.save_pdb_file(pdb_filename, title)
+    
+    @staticmethod
+    def plot_protein_structure_3d_precise(atoms: List[Dict], sequence: str,
+                                      filename: str, title: str = "Protein Structure",
+                                      figsize=(12, 10)):
+        """
+        使用精确原子坐标绘制 3D 蛋白质结构图
+        
+        Args:
+            atoms: 原子坐标列表 [{"name": "N", "coords": (x, y, z)}, ...]
+            sequence: 氨基酸序列
+            filename: 输出文件名
+            title: 图表标题
+            figsize: 图表大小
+        """
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D
+        
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111, projection='3d')
+        
+        color_map = {
+            'N': '#1f77b4',
+            'CA': '#d62728',
+            'C': '#2ca02c',
+            'O': '#ff7f0e',
+            'CB': '#9467bd'
+        }
+        
+        x_coords = []
+        y_coords = []
+        z_coords = []
+        colors = []
+        sizes = []
+        
+        for atom in atoms:
+            x, y, z = atom['coords']
+            x_coords.append(x)
+            y_coords.append(y)
+            z_coords.append(z)
+            colors.append(color_map.get(atom['name'], 'gray'))
+            sizes.append(200 if atom['name'] == 'CA' else 120)
+        
+        scatter = ax.scatter(x_coords, y_coords, z_coords, c=colors, s=sizes, alpha=0.9,
+                           edgecolors='black', linewidths=1.5)
+        
+        for i, atom in enumerate(atoms):
+            name = atom['name']
+            coords = atom['coords']
+            
+            if i + 1 < len(atoms):
+                next_atom = atoms[i + 1]
+                next_name = next_atom['name']
+                next_coords = next_atom['coords']
+                
+                if name == 'N' and next_name == 'CA':
+                    ax.plot([coords[0], next_coords[0]],
+                           [coords[1], next_coords[1]],
+                           [coords[2], next_coords[2]],
+                           color='black', linewidth=4, alpha=0.9, zorder=1)
+                
+                elif name == 'CA' and next_name == 'CB':
+                    ax.plot([coords[0], next_coords[0]],
+                           [coords[1], next_coords[1]],
+                           [coords[2], next_coords[2]],
+                           color='#9467bd', linewidth=3, alpha=0.8, zorder=1)
+                
+                elif name == 'CA' and next_name == 'C':
+                    ax.plot([coords[0], next_coords[0]],
+                           [coords[1], next_coords[1]],
+                           [coords[2], next_coords[2]],
+                           color='black', linewidth=4, alpha=0.9, zorder=1)
+                
+                elif name == 'C' and next_name == 'O':
+                    ax.plot([coords[0], next_coords[0]],
+                           [coords[1], next_coords[1]],
+                           [coords[2], next_coords[2]],
+                           color='#ff7f0e', linewidth=3, alpha=0.8, zorder=1)
+        
+        c_indices = [i for i, atom in enumerate(atoms) if atom['name'] == 'C']
+        n_indices = [i for i, atom in enumerate(atoms) if atom['name'] == 'N']
+        
+        for i in range(len(c_indices) - 1):
+            c_idx = c_indices[i]
+            n_idx = n_indices[i + 1]
+            if c_idx < len(atoms) and n_idx < len(atoms):
+                c_atom = atoms[c_idx]
+                n_atom = atoms[n_idx]
+                ax.plot([c_atom['coords'][0], n_atom['coords'][0]],
+                       [c_atom['coords'][1], n_atom['coords'][1]],
+                       [c_atom['coords'][2], n_atom['coords'][2]],
+                       color='#d62728', linewidth=5, alpha=1.0, zorder=0)
+        
+        aa_colors = plt.cm.tab20(np.linspace(0, 1, len(sequence)))
+        ca_indices = [i for i, atom in enumerate(atoms) if atom['name'] == 'CA']
+        for idx, ca_idx in enumerate(ca_indices):
+            if idx < len(sequence):
+                x, y, z = x_coords[ca_idx], y_coords[ca_idx], z_coords[ca_idx]
+                ax.text(x, y, z, f' {sequence[idx]}', fontsize=14, fontweight='bold',
+                       color='black', bbox=dict(boxstyle='round,pad=0.3',
+                                          facecolor='white',
+                                          edgecolor='black',
+                                          alpha=0.8))
+        
+        ax.set_xlabel('X (Å)', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Y (Å)', fontsize=14, fontweight='bold')
+        ax.set_zlabel('Z (Å)', fontsize=14, fontweight='bold')
+        ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
+        
+        ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 1.0))
+        ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 1.0))
+        ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 1.0))
+        ax.grid(True, linestyle='--', alpha=0.3)
+        
+        legend_elements = [plt.Line2D([0], [0], marker='o', color='w',
+                                  markerfacecolor=color, markersize=10, label=name)
+                      for name, color in color_map.items()]
+        ax.legend(handles=legend_elements, loc='upper left', fontsize=10)
+        
+        max_range = np.array([max(x_coords)-min(x_coords),
+                             max(y_coords)-min(y_coords),
+                             max(z_coords)-min(z_coords)]).max() / 2.0
+        mid_x = (max(x_coords)+min(x_coords)) * 0.5
+        mid_y = (max(y_coords)+min(y_coords)) * 0.5
+        mid_z = (max(z_coords)+min(z_coords)) * 0.5
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+        
+        ax.view_init(elev=20, azim=45)
+        
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        plt.close()

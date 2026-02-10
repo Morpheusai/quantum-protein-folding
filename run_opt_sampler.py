@@ -34,7 +34,7 @@ import traceback
 from lib.job_metadata_logger import JobMetadataLogger
 
 # 创建元数据记录器实例
-metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
+metadata_logger = JobMetadataLogger("protein_folding_jobs_detailed.csv")
 
 # 引入 Job 记录器
 from lib.quantum_optimizer import JobRecorder
@@ -734,6 +734,67 @@ def main():
         print(f"⚠ 导出最优参数时出错: {e}")
     
     print(f"\n🎉 蛋白质折叠计算任务完成！所有结果保存在: {RESULT_DIR}")
+    try:
+        metrics_path = os.path.join(RESULT_DIR, "metrics.json")
+        total_shots = 0
+        total_iters = 0
+        for d in all_conv_data:
+            if isinstance(d, dict) and 'iteration_shots' in d and isinstance(d['iteration_shots'], list):
+                try:
+                    total_shots += sum(int(x) for x in d['iteration_shots'])
+                    total_iters += len(d['iteration_shots'])
+                except:
+                    pass
+        try:
+            ops = transpiled_circuit.count_ops()
+            twoq = int(ops.get('cx', 0)) + int(ops.get('cz', 0)) + int(ops.get('swap', 0))
+            transpile_metrics = {
+                "logical_qubits": int(ansatz.num_qubits),
+                "physical_qubits": int(transpiled_circuit.num_qubits),
+                "depth": int(transpiled_circuit.depth() or 0),
+                "two_qubit_gates": twoq,
+                "ops": {k: int(v) for k, v in ops.items()}
+            }
+        except Exception:
+            transpile_metrics = {}
+        try:
+            per_run = []
+            for d in all_conv_data:
+                values = d.get('values', [])
+                counts = d.get('counts', [])
+                iters = len(values)
+                start = float(values[0]) if iters > 0 else None
+                end = float(values[-1]) if iters > 0 else None
+                min_e = float(min(values)) if iters > 0 else None
+                avg_drop = float((values[0] - values[-1]) / max(1, iters - 1)) if iters > 1 else 0.0
+                per_run.append({
+                    "iterations": iters,
+                    "energy_start": start,
+                    "energy_end": end,
+                    "min_energy": min_e,
+                    "avg_decrease_per_iter": avg_drop
+                })
+            convergence_metrics = {
+                "iterations_total": int(sum(len(d.get('values', [])) for d in all_conv_data)),
+                "best_energy": float(best_energy),
+                "per_run": per_run
+            }
+        except Exception:
+            convergence_metrics = {}
+        metrics = {
+            "backend": args.backend,
+            "shots_requested": int(args.shots),
+            "shots_actual_total": int(total_shots),
+            "iteration_count": int(total_iters),
+            "outcome_summary": f"min_energy={float(best_energy):.6f}",
+            "transpile_metrics": transpile_metrics,
+            "convergence_metrics": convergence_metrics
+        }
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"✓ 指标摘要已保存到: {metrics_path}")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()

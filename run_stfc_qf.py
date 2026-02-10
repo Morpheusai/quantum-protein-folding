@@ -33,6 +33,7 @@ from typing import Optional, Dict, Any
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+from lib.job_metadata_logger import JobMetadataLogger
 
 # 尝试导入 AWS Braket Provider
 try:
@@ -857,6 +858,9 @@ def plot_comparison(
     print(f"Methods comparison plot saved to: {plot_path}")
 
 
+metadata_logger = JobMetadataLogger("protein_folding_jobs_detailed.csv")
+
+@metadata_logger
 def main():
     """主函数"""
     args = parse_args()

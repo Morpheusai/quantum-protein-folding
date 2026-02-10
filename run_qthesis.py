@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from qiskit_algorithms import SamplingMinimumEigensolverResult
 
+from lib.job_metadata_logger import JobMetadataLogger
+
 
 def setup_paths() -> None:
     """为 qthesis-pf 项目设置 Python 导入路径。
@@ -120,6 +122,9 @@ def apply_config(args: argparse.Namespace) -> None:
         constants.RESULTS_DATA_DIRPATH = output_path
 
 
+metadata_logger = JobMetadataLogger("protein_folding_jobs_detailed.csv")
+
+@metadata_logger
 def main() -> None:
     """执行完整的量子蛋白质折叠工作流。
 
@@ -225,6 +230,25 @@ def main() -> None:
     
     logger.info("Simulation completed successfully")
 
+    try:
+        import json
+        import constants
+        metrics_path = Path(constants.RESULTS_DATA_DIRPATH) / "metrics.json"
+        transpile_metrics = {}
+        convergence_metrics = {}
+        metrics = {
+            "backend": args.backend,
+            "shots_requested": int(args.shots),
+            "shots_actual_total": int(args.shots) * (int(len(counts)) if isinstance(counts, list) else 0),
+            "iteration_count": int(len(counts)) if isinstance(counts, list) else 0,
+            "outcome_summary": f"min_energy={float(min(values)):.6f}" if isinstance(values, list) and len(values) > 0 else "",
+            "transpile_metrics": transpile_metrics,
+            "convergence_metrics": convergence_metrics
+        }
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,20 @@
+field,label_cn
+job_id,任务唯一标识
+program_name,入口脚本名称
+backend,量子后端名称
+iteration_count,迭代总次数
+shots_requested,请求的每迭代采样次数
+shots_actual_total,实际累积采样次数
+estimated_cost,预估成本
+environment,运行环境标签
+shots_consistent,采样一致性判断
+result_dir,结果目录路径
+start_time,开始时间(ISO 8601)
+end_time,结束时间(ISO 8601)
+duration_seconds,执行时长(秒)
+status,运行状态
+outcome_summary,结果摘要
+python_version,Python版本
+system_info,系统信息(JSON)
+transpile_metrics,量子转译指标(JSON)
+convergence_metrics,算法收敛指标(JSON)

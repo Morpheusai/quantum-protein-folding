@@ -39,6 +39,7 @@ from qupepfold.qupepfold import (
     write_pdb_with_conect,         # 写入带连接的PDB文件
     plot_energy_breakdown_for_most_negative,  # 绘制能量分解图
 )
+from lib.job_metadata_logger import JobMetadataLogger
 
 
 def plot_protein_3d(atoms, seq, title, output_path):
@@ -212,6 +213,9 @@ def plot_protein_3d(atoms, seq, title, output_path):
     print(f"3D structure plot -> {output_path}")
 
 
+metadata_logger = JobMetadataLogger("protein_folding_jobs_detailed.csv")
+
+@metadata_logger
 def main():
     """
     主函数：量子蛋白质折叠模拟程序入口点
@@ -362,6 +366,21 @@ def main():
     print("\n生成能量分解可视化...")
     plot_energy_breakdown_for_most_negative(probs, hyper, str(output_dir))
     print(f"能量分解图 -> {output_dir / 'most_negative_energy_breakdown.png'}")
+
+    metrics_path = output_dir / "metrics.json"
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        import json
+        transpile_metrics = {}
+        convergence_metrics = {}
+        json.dump({
+            "backend": args.backend,
+            "shots_requested": int(args.shots),
+            "shots_actual_total": 0,
+            "iteration_count": int(args.tries),
+            "outcome_summary": f"cvar_min={float(best_cvar):.6f}",
+            "transpile_metrics": transpile_metrics,
+            "convergence_metrics": convergence_metrics
+        }, f, indent=2)
 
 
 if __name__ == "__main__":

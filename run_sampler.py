@@ -73,7 +73,7 @@ parser.add_argument('--penalty_local_overlap', type=float, default=10,help='局�
 parser.add_argument('--alpha', type=float, default=0.1,help='CVaR参数: 选择最低能量的alpha比例样本')
 
 # 采样参数
-parser.add_argument('--shots', type=int, default=1000, help='采样次数')
+parser.add_argument('--shots', type=int, default=100, help='采样次数')
 parser.add_argument('--dry_run', action='store_true', help='干跑模式：仅在真实提交前进行本地预检')
 parser.add_argument('--max_results', type=int, default=1,help='每次迭代的结果数量')
 
@@ -98,7 +98,7 @@ args = parser.parse_args()
 # =============================================================================
 # 3. 全局变量和装饰器
 # =============================================================================
-metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
+metadata_logger = JobMetadataLogger("protein_folding_jobs_detailed.csv")
 
 
 @metadata_logger
@@ -323,13 +323,23 @@ def main():
         print(f"    - 正在执行跨实验结构去重 (目标: {args.max_results} 个不同结构)...")
         seen_structures = set()
         
+        # 使用精确 3D 结构生成进行去重
+        from lib.protein_geometry import ProteinGeometryBuilder
+        
+        builder = ProteinFoldingBuilder(args.main_chain)
+        turn2qubit = builder.get_turn2qubit()
+        geo_builder = ProteinGeometryBuilder(args.main_chain)
+        
         for bitstring, (energy, count) in sorted_unique_bs:
             try:
-                # 构造 MockResult。注意：eigenstate 必须是字典 {bitstring: 1.0} 才能被 interpret 正确解析
-                temp_mock_result = MockQuantumResult({bitstring: 1.0}, energy, {bitstring: count}, args.shots)
-                temp_result = problem.interpret(temp_mock_result)
-                ts = temp_result.turn_sequence
-                ts_str = str(ts)
+                # 使用精确 3D 结构生成
+                atoms = geo_builder.build_3d_structure_from_bitstring(bitstring, turn2qubit)
+                
+                # 生成转向序列
+                cfg_bits = bitstring[:turn2qubit.count('q')]
+                config = geo_builder._fill_config_bits(cfg_bits, turn2qubit)
+                turns = [int(config[k:k+2], 2) for k in range(0, len(config), 2)]
+                ts_str = str(turns)
                 
                 if ts_str not in seen_structures:
                     seen_structures.add(ts_str)
@@ -375,29 +385,49 @@ def main():
         print(f"\n    - 结果 {idx+1}/{len(final_top_results)}: 能量 = {energy:.4f}")
         
         try:
-            # 创建模拟量子结果对象。注意：eigenstate 必须是字典 {bitstring: 1.0}
-            mock_result = MockQuantumResult({bitstring: 1.0}, energy, {bitstring: count}, count)
+            # 使用精确能量计算器获取能量分解
+            from lib.precise_energy_calculator import PreciseEnergyCalculator
+            from lib.protein_geometry import ProteinGeometryBuilder
             
-            # 解析蛋白质结构
-            result = problem.interpret(mock_result)
+            builder = ProteinFoldingBuilder(args.main_chain)
+            interaction_matrix = builder.get_interaction_matrix()
+            turn2qubit = builder.get_turn2qubit()
+            
+            # 精确能量计算
+            calc = PreciseEnergyCalculator(args.main_chain, interaction_matrix)
+            energy_breakdown = calc.calculate_energy_breakdown(bitstring, turn2qubit)
+            
+            print(f"    - 能量分解:")
+            print(f"      Backbone: {energy_breakdown['backbone']:.4f}")
+            print(f"      MJ: {energy_breakdown['mj']:.4f}")
+            print(f"      Distance: {energy_breakdown['distance']:.4f}")
+            print(f"      Locality: {energy_breakdown['locality']:.4f}")
+            print(f"      Total: {energy_breakdown['total']:.4f}")
+            
+            # 精确 3D 结构生成
+            geo_builder = ProteinGeometryBuilder(args.main_chain)
+            atoms = geo_builder.build_3d_structure_from_bitstring(bitstring, turn2qubit)
+            
+            # 生成 XYZ 数据
+            xyz_data = [[atom["name"], atom["coords"][0], atom["coords"][1], atom["coords"][2]] 
+                        for atom in atoms]
+            
+            # 生成转向序列
+            cfg_bits = bitstring[:turn2qubit.count('q')]
+            config = geo_builder._fill_config_bits(cfg_bits, turn2qubit)
+            turns = [int(config[k:k+2], 2) for k in range(0, len(config), 2)]
+            
             print(f"    - 蛋白质结构解析完成")
-            protein_structure = "".join(result.protein_shape_file_gen.main_chain_aminoacid_list)
-            print(f"    - 蛋白质形状: {protein_structure}")
-            print(f"    - 蛋白质能量: {energy:.4f}")
+            print(f"    - 转向序列: {turns}")
             
-            # 准备结果数据
-            xyz_data = result.protein_shape_file_gen.get_xyz_data()
-            xyz_coords = [[str(row[0]), str(row[1]), str(row[2]), str(row[3])] for row in xyz_data]
-            energy_value = float(energy)
-            energy_str = f"{abs(energy_value):.4f}"
-            
-            # 保存JSON结果文件
-            result_filename = os.path.join(result_dir, f"result_rank_{idx+1}_energy_{energy_str}.json")
+            # 保存 JSON 结果文件
+            result_filename = os.path.join(result_dir, f"result_rank_{idx+1}_energy_{abs(energy):.4f}.json")
             result_dict = {
                 "rank": idx + 1,
-                "energy": energy_value,
-                "turn_sequence": result.turn_sequence,
-                "main_chain_sequence": protein_structure,
+                "energy": energy,
+                "energy_breakdown": energy_breakdown,
+                "turn_sequence": turns,
+                "main_chain_sequence": args.main_chain,
                 "shots_requested": args.shots,
                 "bitstring": bitstring,
                 "count": count,
@@ -408,36 +438,30 @@ def main():
                 "penalty_back": args.penalty_back,
                 "penalty_chiral": args.penalty_chiral,
                 "penalty_local_overlap": args.penalty_local_overlap,
-                "analysis_mode": "global_candidate_pool",
+                "analysis_mode": "precise_energy_calculation",
                 "optimization_convergence": {
                     "evaluation_counts": list(range(len(convergence_history))),
                     "cvar_energy_values": convergence_history,
                     "cumulative_shots": cumulative_shots_history,
                     "iteration_shots": iteration_shots_history
                 },
-                "xyz_coordinates": xyz_coords
+                "xyz_coordinates": xyz_data
             }
             ResultHandler.save_result(result_dict, result_filename)
-            print(f"    - 结果已保存到: {result_filename}")
             
-            # 生成PDB文件
-            try:
-                pdb_filename = os.path.join(result_dir, f"structure_rank_{idx+1}_energy_{energy_str}.pdb")
-                ResultHandler.convert_xyz_to_detailed_pdb(result.protein_shape_file_gen.get_xyz_data(), pdb_filename)
-                print(f"    - PDB文件已保存到: {pdb_filename}")
-            except Exception as e:
-                print(f"    - PDB文件生成失败: {e}")
+            # 使用精确 PDB 文件生成
+            pdb_filename = os.path.join(result_dir, f"structure_rank_{idx+1}_energy_{abs(energy):.4f}.pdb")
+            geo_builder.write_pdb_file(atoms, bitstring, pdb_filename)
+            print(f"    - PDB 文件已保存: {pdb_filename}")
             
-            # 生成蛋白质结构图
-            try:
-                structure_plot_filename = os.path.join(result_dir, f"structure_rank_{idx+1}_energy_{energy_str}.png")
-                ResultHandler.plot_protein_structure_3d(result, structure_plot_filename, 
-                                                              title=f"Result {idx+1} (E={energy_value:.4f})")
-                print(f"    - 结构图已保存到: {structure_plot_filename}")
-            except Exception as e:
-                print(f"    - 结构图生成失败: {e}")
+            # 生成 3D 可视化
+            png_filename = os.path.join(result_dir, f"structure_rank_{idx+1}_energy_{abs(energy):.4f}.png")
+            ResultHandler.plot_protein_structure_3d_precise(atoms, args.main_chain, png_filename, 
+                                                       f"Result {idx+1} (E={energy:.4f})")
+            print(f"    - 3D 可视化已保存: {png_filename}")
+            
         except Exception as e:
-            print(f"    - 蛋白质结构解析失败: {e}")
+            print(f"    ❌ 结果处理失败: {e}")
             import traceback
             traceback.print_exc()
 
@@ -496,6 +520,56 @@ def main():
     # 3.11 任务完成
     # =============================================================================
     print(f"\n✓ 所有任务完成！结果保存在: {result_dir}")
+    try:
+        metrics_path = os.path.join(result_dir, "metrics.json")
+        total_shots = 0
+        total_iters = 0
+        try:
+            total_shots = int(sum(int(x) for x in iteration_shots_history)) if isinstance(iteration_shots_history, list) else 0
+            total_iters = int(len(iteration_shots_history)) if isinstance(iteration_shots_history, list) else 0
+        except:
+            pass
+        try:
+            ops = transpiled_circuit.count_ops()
+            twoq = int(ops.get('cx', 0)) + int(ops.get('cz', 0)) + int(ops.get('swap', 0))
+            transpile_metrics = {
+                "logical_qubits": int(ansatz.num_qubits),
+                "physical_qubits": int(transpiled_circuit.num_qubits),
+                "depth": int(transpiled_circuit.depth() or 0),
+                "two_qubit_gates": twoq,
+                "ops": {k: int(v) for k, v in ops.items()}
+            }
+        except Exception:
+            transpile_metrics = {}
+        try:
+            per_run = [{
+                "iterations": int(len(convergence_history)),
+                "energy_start": float(convergence_history[0]) if len(convergence_history) > 0 else None,
+                "energy_end": float(convergence_history[-1]) if len(convergence_history) > 0 else None,
+                "min_energy": float(min(convergence_history)) if len(convergence_history) > 0 else None,
+                "avg_decrease_per_iter": float((convergence_history[0] - convergence_history[-1]) / max(1, len(convergence_history) - 1)) if len(convergence_history) > 1 else 0.0
+            }]
+            convergence_metrics = {
+                "iterations_total": int(len(convergence_history)),
+                "best_energy": float(best_energy),
+                "per_run": per_run
+            }
+        except Exception:
+            convergence_metrics = {}
+        metrics = {
+            "backend": args.backend,
+            "shots_requested": int(args.shots),
+            "shots_actual_total": int(total_shots),
+            "iteration_count": int(total_iters),
+            "outcome_summary": f"min_energy={float(best_energy):.6f}",
+            "transpile_metrics": transpile_metrics,
+            "convergence_metrics": convergence_metrics
+        }
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"✓ 指标摘要已保存到: {metrics_path}")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

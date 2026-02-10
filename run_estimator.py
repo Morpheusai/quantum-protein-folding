@@ -104,7 +104,7 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, resu
 
 
 # 初始化作业元数据记录器
-metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
+metadata_logger = JobMetadataLogger("protein_folding_jobs_detailed.csv")
 
 
 @metadata_logger
@@ -300,16 +300,25 @@ def main():
             
         if args.unique_structures:
             try:
-                # 快速验证结构唯一性
-                # 使用 MockResult 类来利用 problem.interpret 进行去重
-                from lib.quantum_optimizer import MockQuantumResult
-                temp_res = MockQuantumResult({bitstring: 1.0}, energy, {bitstring: 1}, 1)
-                interpreted = problem.interpret(temp_res)
-                struct_key = interpreted.turn_sequence
+                # 使用精确 3D 结构生成进行去重
+                from lib.protein_geometry import ProteinGeometryBuilder
+                
+                builder = ProteinFoldingBuilder(args.main_chain)
+                turn2qubit = builder.get_turn2qubit()
+                geo_builder = ProteinGeometryBuilder(args.main_chain)
+                
+                # 使用精确 3D 结构生成
+                atoms = geo_builder.build_3d_structure_from_bitstring(bitstring, turn2qubit)
+                
+                # 生成转向序列
+                cfg_bits = bitstring[:turn2qubit.count('q')]
+                config = geo_builder._fill_config_bits(cfg_bits, turn2qubit)
+                turns = [int(config[k:k+2], 2) for k in range(0, len(config), 2)]
+                struct_key = str(turns)
                 
                 if struct_key not in seen_structures:
                     seen_structures.add(struct_key)
-                    final_top_results.append((bitstring, energy, restart_idx, interpreted))
+                    final_top_results.append((bitstring, energy, restart_idx, turns))
             except Exception as e:
                 print(f"    ⚠ 结构分析失败: {e}")
                 continue
@@ -322,27 +331,49 @@ def main():
     # =========================================================================
     # 9. 循环保存排名前 N 的独特结果
     # =========================================================================
-    for idx, (bitstring, energy, restart_idx, result) in enumerate(final_top_results):
+    for idx, (bitstring, energy, restart_idx, turns) in enumerate(final_top_results):
         print(f"\n    - 结果 {idx+1}/{len(final_top_results)}: 能量 = {energy:.4f}, 来自实验 {restart_idx}")
         
-        if result is None:
-            # 如果之前的循环没完成解析，这里补上
-            from lib.quantum_optimizer import MockQuantumResult
-            temp_res = MockQuantumResult({bitstring: 1.0}, energy, {bitstring: 1}, 1)
-            result = problem.interpret(temp_res)
-
+        # 使用精确能量计算器获取能量分解
+        from lib.precise_energy_calculator import PreciseEnergyCalculator
+        from lib.protein_geometry import ProteinGeometryBuilder
+        
+        builder = ProteinFoldingBuilder(args.main_chain)
+        interaction_matrix = builder.get_interaction_matrix()
+        turn2qubit = builder.get_turn2qubit()
+        
+        # 精确能量计算
+        calc = PreciseEnergyCalculator(args.main_chain, interaction_matrix)
+        energy_breakdown = calc.calculate_energy_breakdown(bitstring, turn2qubit)
+        
+        print(f"    - 能量分解:")
+        print(f"      Backbone: {energy_breakdown['backbone']:.4f}")
+        print(f"      MJ: {energy_breakdown['mj']:.4f}")
+        print(f"      Distance: {energy_breakdown['distance']:.4f}")
+        print(f"      Locality: {energy_breakdown['locality']:.4f}")
+        print(f"      Total: {energy_breakdown['total']:.4f}")
+        
+        # 精确 3D 结构生成
+        geo_builder = ProteinGeometryBuilder(args.main_chain)
+        atoms = geo_builder.build_3d_structure_from_bitstring(bitstring, turn2qubit)
+        
+        # 生成 XYZ 数据
+        xyz_data = [[atom["name"], atom["coords"][0], atom["coords"][1], atom["coords"][2]] 
+                    for atom in atoms]
+        
+        print(f"    - 蛋白质结构解析完成")
+        print(f"    - 转向序列: {turns}")
+        
         energy_str = f"{abs(energy):.4f}"
         
         # 准备结果字典
-        xyz_data = result.protein_shape_file_gen.get_xyz_data()
-        xyz_coords = [[str(row[0]), str(row[1]), str(row[2]), str(row[3])] for row in xyz_data]
-        
         result_filename = os.path.join(result_dir, f"result_{idx+1}_energy_{energy_str}.json")
         result_dict = {
             "result_index": idx + 1,
             "original_restart": restart_idx,
             "energy": energy,
-            "turn_sequence": result.turn_sequence,
+            "energy_breakdown": energy_breakdown,
+            "turn_sequence": turns,
             "main_chain_sequence": args.main_chain,
             "shots_requested": args.shots,
             "backend": args.backend,
@@ -351,19 +382,20 @@ def main():
                 "energy_values": all_conv_data[restart_idx-1]['values'],
                 "stds": all_conv_data[restart_idx-1].get('stds', [])
             },
-            "xyz_coordinates": xyz_coords
+            "xyz_coordinates": xyz_data
         }
         ResultHandler.save_result(result_dict, result_filename)
         
-        # PDB
+        # 使用精确 PDB 文件生成
         pdb_filename = os.path.join(result_dir, f"structure_{idx+1}_energy_{energy_str}.pdb")
-        ResultHandler.convert_xyz_to_detailed_pdb(xyz_data, pdb_filename)
+        geo_builder.write_pdb_file(atoms, bitstring, pdb_filename)
+        print(f"    - PDB 文件已保存: {pdb_filename}")
         
-        # PNG
+        # 生成 3D 可视化
         png_filename = os.path.join(result_dir, f"structure_{idx+1}_energy_{energy_str}.png")
-        ResultHandler.plot_protein_structure_3d(result, png_filename, title=f"Result {idx+1} (E={energy:.4f})")
-        
-        print(f"    ✓ 已保存: JSON, PDB, PNG")
+        ResultHandler.plot_protein_structure_3d_precise(atoms, args.main_chain, png_filename, 
+                                                       f"Result {idx+1} (E={energy:.4f})")
+        print(f"    - 3D 可视化已保存: {png_filename}")
 
     # =========================================================================
     # 9. 生成可视化图表
@@ -426,6 +458,75 @@ def main():
         print(f"⚠ 导出最优参数时出错: {e}")
 
     print(f"\n✓ 所有任务完成！结果保存在: {result_dir}")
+    
+    try:
+        metrics_path = os.path.join(result_dir, "metrics.json")
+        total_shots = 0
+        total_iters = 0
+        try:
+            for d in all_conv_data:
+                if isinstance(d, dict) and 'iteration_shots' in d and isinstance(d['iteration_shots'], list):
+                    total_shots += sum(int(x) for x in d['iteration_shots'])
+                    total_iters += len(d['iteration_shots'])
+        except:
+            pass
+        try:
+            transpiled = transpile(base_ansatz, backend=backend_info.get('backend'), optimization_level=3) if backend_info.get('backend') else base_ansatz
+            ops = transpiled.count_ops()
+            twoq = int(ops.get('cx', 0)) + int(ops.get('cz', 0)) + int(ops.get('swap', 0))
+            transpile_metrics = {
+                "logical_qubits": int(base_ansatz.num_qubits),
+                "physical_qubits": int(transpiled.num_qubits),
+                "depth": int(transpiled.depth() or 0),
+                "two_qubit_gates": twoq,
+                "ops": {k: int(v) for k, v in ops.items()}
+            }
+        except Exception:
+            transpile_metrics = {}
+        try:
+            per_run = []
+            for d in all_conv_data:
+                values = d.get('values', [])
+                iters = len(values)
+                start = float(values[0]) if iters > 0 else None
+                end = float(values[-1]) if iters > 0 else None
+                min_e = float(min(values)) if iters > 0 else None
+                avg_drop = float((values[0] - values[-1]) / max(1, iters - 1)) if iters > 1 else 0.0
+                per_run.append({
+                    "iterations": iters,
+                    "energy_start": start,
+                    "energy_end": end,
+                    "min_energy": min_e,
+                    "avg_decrease_per_iter": avg_drop
+                })
+            best_end = None
+            if best_restart_idx > 0:
+                br = all_conv_data[best_restart_idx - 1]
+                vals = br.get('values', [])
+                best_end = float(vals[-1]) if len(vals) > 0 else None
+            convergence_metrics = {
+                "iterations_total": int(sum(len(d.get('values', [])) for d in all_conv_data)),
+                "best_run_index": int(best_restart_idx),
+                "best_energy": float(best_overall_energy),
+                "energy_end_best_run": best_end,
+                "per_run": per_run
+            }
+        except Exception:
+            convergence_metrics = {}
+        metrics = {
+            "backend": args.backend,
+            "shots_requested": int(args.shots),
+            "shots_actual_total": int(total_shots),
+            "iteration_count": int(total_iters),
+            "outcome_summary": f"min_energy={float(best_overall_energy):.6f}",
+            "transpile_metrics": transpile_metrics,
+            "convergence_metrics": convergence_metrics
+        }
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"✓ 指标摘要已保存到: {metrics_path}")
+    except Exception:
+        pass
     
     return True
 

@@ -20,6 +20,7 @@ import json
 import traceback
 
 from lib.energy_calculator import EnergyCalculator
+from lib.protein_folding_builder import ProteinFoldingBuilder
 
 
 class MockQuantumResult:
@@ -568,9 +569,19 @@ class QuantumOptimizer:
                                     counts = result_recovered.get_counts()
                                 # 跳过提交，直接处理恢复的结果
                                 actual_shots = sum(counts.values())
-                                energy = EnergyCalculator.calculate_cvar_energy(counts, qubit_op, args.alpha)
+                                
+                                # 使用精确能量计算
+                                builder = ProteinFoldingBuilder(args.main_chain)
+                                interaction_matrix = builder.get_interaction_matrix()
+                                turn2qubit = builder.get_turn2qubit()
+                                
+                                energy = EnergyCalculator.calculate_cvar_energy_precise(
+                                    counts, args.main_chain, interaction_matrix, turn2qubit, args.alpha
+                                )
                                 energy_std = EnergyCalculator.calculate_energy_std(counts, qubit_op)
-                                top_results = EnergyCalculator.extract_top_results(counts, qubit_op, args.max_results)
+                                top_results = EnergyCalculator.extract_top_results_precise(
+                                    counts, args.main_chain, interaction_matrix, turn2qubit, args.max_results
+                                )
                                 top_energies = [result[1] for result in top_results]
                                 convergence_history.append(energy)
                                 if not hasattr(objective_function, 'std_history'):
@@ -610,10 +621,19 @@ class QuantumOptimizer:
                 
                 actual_shots = sum(counts.values())
                 
-                energy = EnergyCalculator.calculate_cvar_energy(counts, qubit_op, args.alpha)
+                # 使用精确能量计算
+                builder = ProteinFoldingBuilder(args.main_chain)
+                interaction_matrix = builder.get_interaction_matrix()
+                turn2qubit = builder.get_turn2qubit()
+                
+                energy = EnergyCalculator.calculate_cvar_energy_precise(
+                    counts, args.main_chain, interaction_matrix, turn2qubit, args.alpha
+                )
                 energy_std = EnergyCalculator.calculate_energy_std(counts, qubit_op)
                 
-                top_results = EnergyCalculator.extract_top_results(counts, qubit_op, args.max_results)
+                top_results = EnergyCalculator.extract_top_results_precise(
+                    counts, args.main_chain, interaction_matrix, turn2qubit, args.max_results
+                )
                 top_energies = [result[1] for result in top_results]
                 
                 convergence_history.append(energy)
@@ -655,32 +675,32 @@ class QuantumOptimizer:
                     protein_structure_info = {}
                     top_results_for_struct = iteration_data.get("top_results", [])
                     
-                    if problem and top_results_for_struct:
+                    if top_results_for_struct:
                         best_bitstring, best_energy, best_count = top_results_for_struct[0]
                         
-                        class MockResult:
-                            def __init__(self, bs, val, counts, total):
-                                self.eigenstate = {bs: 1.0}
-                                self.eigenvalue = val
-                                self.probabilities = {k[::-1]: v/total for k, v in counts.items()}
+                        # 使用精确 3D 结构生成
+                        from lib.protein_geometry import ProteinGeometryBuilder
                         
-                        raw_res = MockResult(best_bitstring, best_energy, counts, actual_shots)
-                        try:
-                            result = problem.interpret(raw_res)
-                            xyz_data = result.protein_shape_file_gen.get_xyz_data()
-                            
-                            protein_structure_info = {
-                                "turn_sequence": result.turn_sequence if hasattr(result, 'turn_sequence') else "",
-                                "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None else [],
-                                "best_bitstring": best_bitstring
-                            }
-                        except Exception as e:
-                            print(f"    ⚠ 迭代 {iteration_data['iteration']} 蛋白质结构解析失败: {e}")
-                            protein_structure_info = {
-                                "turn_sequence": "",
-                                "xyz_coordinates": [],
-                                "best_bitstring": best_bitstring
-                            }
+                        builder = ProteinFoldingBuilder(args.main_chain)
+                        turn2qubit = builder.get_turn2qubit()
+                        
+                        geo_builder = ProteinGeometryBuilder(args.main_chain)
+                        atoms = geo_builder.build_3d_structure_from_bitstring(best_bitstring, turn2qubit)
+                        
+                        # 生成 XYZ 数据
+                        xyz_data = [[atom["name"], atom["coords"][0], atom["coords"][1], atom["coords"][2]] 
+                                    for atom in atoms]
+                        
+                        # 生成转向序列
+                        cfg_bits = best_bitstring[:turn2qubit.count('q')]
+                        config = geo_builder._fill_config_bits(cfg_bits, turn2qubit)
+                        turns = [int(config[k:k+2], 2) for k in range(0, len(config), 2)]
+                        
+                        protein_structure_info = {
+                            "turn_sequence": turns,
+                            "xyz_coordinates": xyz_data,
+                            "best_bitstring": best_bitstring
+                        }
                     
                     iteration_result_path = os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json')
                     with open(iteration_result_path, 'w') as f:

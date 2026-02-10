@@ -127,3 +127,45 @@ class ProteinFoldingBuilder:
             'penalty_local_overlap': self.penalty_local_overlap,
             'num_qubits': self.get_num_qubits()
         }
+    
+    def get_turn2qubit(self):
+        """
+        获取转向到量子比特映射模板
+        
+        Returns:
+            str: 转向到量子比特映射模板
+        """
+        N = len(self.main_chain)
+        total_turn_bits = 2 * (N - 1)
+        fixed_prefix = "0100q1"
+        if len(fixed_prefix) > total_turn_bits:
+            fixed_prefix = fixed_prefix[:total_turn_bits]
+        variable_bits = 'q' * max(0, total_turn_bits - len(fixed_prefix))
+        return fixed_prefix + variable_bits
+    
+    def get_interaction_matrix(self):
+        """
+        获取相互作用能量矩阵
+        
+        Returns:
+            np.ndarray: 相互作用能量矩阵 (N x N)
+        """
+        import numpy as np
+        from src.protein_folding.interactions.miyazawa_jernigan_interaction import MiyazawaJerniganInteraction
+        
+        N = len(self.main_chain)
+        interaction = MiyazawaJerniganInteraction()
+        
+        # 使用 calculate_energy_matrix 方法获取能量矩阵
+        pair_energies = interaction.calculate_energy_matrix(self.main_chain)
+        
+        # 转换为简单的 N x N 矩阵
+        mat = np.zeros((N, N))
+        for i in range(N):
+            for j in range(N):
+                if i < j:
+                    mat[i, j] = pair_energies[i + 1, 0, j + 1, 0]
+                elif i > j:
+                    mat[i, j] = mat[j, i]
+        
+        return mat

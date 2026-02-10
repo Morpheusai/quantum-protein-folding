@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.join(current_dir, 'src'))
 from lib.job_metadata_logger import JobMetadataLogger
 
 # 创建元数据记录器实例
-metadata_logger = JobMetadataLogger("protein_folding_jobs.csv")
+metadata_logger = JobMetadataLogger("protein_folding_jobs_detailed.csv")
 
 # 引入优化器包装组件和 Job 记录器
 from lib.quantum_optimizer import JobRecorder, AdaptiveEstimatorV2, StructuralLoggingEstimator
@@ -767,6 +767,77 @@ def main():
         print(f"⚠ 导出最优参数时出错: {e}")
     
     print(f"🎉 任务完成。结果目录: {RESULT_DIR}")
+    
+    try:
+        metrics_path = os.path.join(RESULT_DIR, "metrics.json")
+        total_shots = 0
+        total_iters = 0
+        for d in all_conv_data:
+            if isinstance(d, dict) and 'iteration_shots' in d and isinstance(d['iteration_shots'], list):
+                try:
+                    total_shots += sum(int(x) for x in d['iteration_shots'])
+                    total_iters += len(d['iteration_shots'])
+                except:
+                    pass
+        try:
+            from qiskit import transpile
+            transpiled = transpile(base_ansatz, backend=backend_info.get('backend'), optimization_level=3) if backend_info.get('backend') else base_ansatz
+            ops = transpiled.count_ops()
+            twoq = int(ops.get('cx', 0)) + int(ops.get('cz', 0)) + int(ops.get('swap', 0))
+            transpile_metrics = {
+                "logical_qubits": int(base_ansatz.num_qubits),
+                "physical_qubits": int(transpiled.num_qubits),
+                "depth": int(transpiled.depth() or 0),
+                "two_qubit_gates": twoq,
+                "ops": {k: int(v) for k, v in ops.items()}
+            }
+        except Exception:
+            transpile_metrics = {}
+        try:
+            per_run = []
+            for d in all_conv_data:
+                values = d.get('values', [])
+                counts = d.get('counts', [])
+                iters = len(values)
+                start = float(values[0]) if iters > 0 else None
+                end = float(values[-1]) if iters > 0 else None
+                min_e = float(min(values)) if iters > 0 else None
+                avg_drop = float((values[0] - values[-1]) / max(1, iters - 1)) if iters > 1 else 0.0
+                per_run.append({
+                    "iterations": iters,
+                    "energy_start": start,
+                    "energy_end": end,
+                    "min_energy": min_e,
+                    "avg_decrease_per_iter": avg_drop
+                })
+            best_end = None
+            if best_restart_idx > 0:
+                br = all_conv_data[best_restart_idx - 1]
+                vals = br.get('values', [])
+                best_end = float(vals[-1]) if len(vals) > 0 else None
+            convergence_metrics = {
+                "iterations_total": int(sum(len(d.get('values', [])) for d in all_conv_data)),
+                "best_run_index": int(best_restart_idx),
+                "best_energy": float(best_overall_energy),
+                "energy_end_best_run": best_end,
+                "per_run": per_run
+            }
+        except Exception:
+            convergence_metrics = {}
+        metrics = {
+            "backend": args.backend,
+            "shots_requested": int(args.shots),
+            "shots_actual_total": int(total_shots),
+            "iteration_count": int(total_iters),
+            "outcome_summary": f"min_energy={float(best_overall_energy):.6f}",
+            "transpile_metrics": transpile_metrics,
+            "convergence_metrics": convergence_metrics
+        }
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"✓ 指标摘要已保存到: {metrics_path}")
+    except Exception:
+        pass
     
     return True
 

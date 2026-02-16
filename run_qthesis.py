@@ -290,6 +290,7 @@ def main() -> None:
             "shots_actual_total": int(args.shots) * (int(len(counts)) if isinstance(counts, list) else 0),
             "iteration_count": int(len(counts)) if isinstance(counts, list) else 0,
             "outcome_summary": f"min_energy={float(min(values)):.6f}" if isinstance(values, list) and len(values) > 0 else "",
+            "qubits_used": int(compressed_h.num_qubits),
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }

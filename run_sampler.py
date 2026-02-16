@@ -203,6 +203,8 @@ def main():
     print(f"  - 结果目录: {result_dir}")
     
     all_conv_data = []
+    all_trials_iteration_shots = []
+    all_trials_cumulative_shots = []
     
     # =============================================================================
     # 3.6 执行CVaR优化
@@ -238,8 +240,12 @@ def main():
             )
             
             # 结果解包: res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history
-            res, convergence_history = results_tuple[0], results_tuple[1]
-            iteration_results = results_tuple[3]
+            res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history = results_tuple
+            # 汇总跨试验的 shots 信息
+            if isinstance(iteration_shots_history, list) and len(iteration_shots_history) > 0:
+                all_trials_iteration_shots.append(iteration_shots_history)
+            if isinstance(cumulative_shots_history, list) and len(cumulative_shots_history) > 0:
+                all_trials_cumulative_shots.append(cumulative_shots_history)
             
             # 提取该实验中出现的所有优秀 bitstrings (从 iteration_results 中获取)
             trial_candidates = []
@@ -525,8 +531,10 @@ def main():
         total_shots = 0
         total_iters = 0
         try:
-            total_shots = int(sum(int(x) for x in iteration_shots_history)) if isinstance(iteration_shots_history, list) else 0
-            total_iters = int(len(iteration_shots_history)) if isinstance(iteration_shots_history, list) else 0
+            # 跨所有试验聚合迭代与shots
+            if isinstance(all_trials_iteration_shots, list) and len(all_trials_iteration_shots) > 0:
+                total_shots = int(sum(int(x) for trial in all_trials_iteration_shots for x in trial))
+                total_iters = int(sum(len(trial) for trial in all_trials_iteration_shots))
         except:
             pass
         try:

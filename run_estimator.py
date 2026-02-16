@@ -519,6 +519,7 @@ def main():
             "shots_actual_total": int(total_shots),
             "iteration_count": int(total_iters),
             "outcome_summary": f"min_energy={float(best_overall_energy):.6f}",
+            "qubits_used": int(base_ansatz.num_qubits),
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }

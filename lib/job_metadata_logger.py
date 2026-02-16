@@ -113,6 +113,7 @@ class JobMetadataLogger:
             'iteration_count',
             'shots_requested',
             'shots_actual_total',
+            'qubits_used',
             'estimated_cost',
             'environment',
             'shots_consistent',
@@ -131,6 +132,7 @@ class JobMetadataLogger:
             'job_id': '任务唯一标识',
             'program_name': '入口脚本名称',
             'backend': '量子后端名称',
+            'qubits_used': '实际量子位数',
             'environment': '运行环境标签',
             'shots_requested': '请求的每迭代采样次数',
             'shots_actual_total': '实际累积采样次数',
@@ -222,6 +224,34 @@ class JobMetadataLogger:
         found_iteration = False
         transpile_metrics = None
         convergence_metrics = None
+        qubits_used = None
+        try:
+            metrics_path = os.path.join(result_dir, "metrics.json")
+            if result_dir and os.path.exists(metrics_path):
+                with open(metrics_path, 'r', encoding='utf-8') as f:
+                    m = json.load(f)
+                backend = m.get('backend', backend)
+                environment = backend
+                shots_requested = m.get('shots_requested', shots_requested)
+                shots_actual_total = int(m.get('shots_actual_total') or 0)
+                iteration_count = int(m.get('iteration_count') or 0)
+                outcome_summary = m.get('outcome_summary', outcome_summary)
+                transpile_metrics = m.get('transpile_metrics', transpile_metrics)
+                convergence_metrics = m.get('convergence_metrics', convergence_metrics)
+                qubits_used = m.get('qubits_used', qubits_used)
+                return {
+                    'backend': backend,
+                    'environment': environment,
+                    'shots_requested': shots_requested,
+                    'shots_actual_total': shots_actual_total,
+                    'iteration_count': iteration_count,
+                    'outcome_summary': outcome_summary,
+                    'transpile_metrics': transpile_metrics,
+                    'convergence_metrics': convergence_metrics,
+                    'qubits_used': qubits_used
+                }
+        except Exception:
+            pass
         if not result_dir or not os.path.exists(result_dir):
             return {
                 'backend': backend,
@@ -231,7 +261,8 @@ class JobMetadataLogger:
                 'iteration_count': iteration_count,
                 'outcome_summary': outcome_summary,
                 'transpile_metrics': transpile_metrics,
-                'convergence_metrics': convergence_metrics
+                'convergence_metrics': convergence_metrics,
+                'qubits_used': qubits_used
             }
         for root, _, files in os.walk(result_dir):
             for name in files:
@@ -245,6 +276,11 @@ class JobMetadataLogger:
                                 shots_requested = int(data.get('shots_requested') or 0)
                             elif 'shots' in data and isinstance(data.get('shots'), int):
                                 shots_requested = int(data.get('shots') or 0)
+                        if qubits_used is None:
+                            if 'qubits_used' in data and isinstance(data.get('qubits_used'), int):
+                                qubits_used = int(data.get('qubits_used'))
+                            elif 'num_qubits' in data and isinstance(data.get('num_qubits'), int):
+                                qubits_used = int(data.get('num_qubits'))
                         # 迭代级实际shots
                         if 'actual_shots' in data and isinstance(data.get('actual_shots'), int):
                             shots_actual_total += int(data.get('actual_shots') or 0)
@@ -275,8 +311,24 @@ class JobMetadataLogger:
                                 outcome_summary = f"cvar={float(data['cvar_energy']):.6f}"
                         if 'transpile_metrics' in data and transpile_metrics is None:
                             transpile_metrics = data.get('transpile_metrics')
+                            try:
+                                if isinstance(transpile_metrics, dict) and qubits_used is None:
+                                    if 'logical_qubits' in transpile_metrics and isinstance(transpile_metrics['logical_qubits'], int):
+                                        qubits_used = int(transpile_metrics['logical_qubits'])
+                                    elif 'physical_qubits' in transpile_metrics and isinstance(transpile_metrics['physical_qubits'], int):
+                                        qubits_used = int(transpile_metrics['physical_qubits'])
+                            except:
+                                pass
                         if 'convergence_metrics' in data and convergence_metrics is None:
                             convergence_metrics = data.get('convergence_metrics')
+                        if not found_iteration:
+                            try:
+                                if 'iteration_count' in data and isinstance(data.get('iteration_count'), int):
+                                    iteration_count = max(iteration_count, int(data.get('iteration_count')))
+                                if shots_actual_total == 0 and 'shots_actual_total' in data and isinstance(data.get('shots_actual_total'), int):
+                                    shots_actual_total = int(data.get('shots_actual_total'))
+                            except:
+                                pass
                     except:
                         pass
                 elif name.endswith('.csv'):
@@ -311,7 +363,8 @@ class JobMetadataLogger:
             'iteration_count': iteration_count,
             'outcome_summary': outcome_summary,
             'transpile_metrics': transpile_metrics,
-            'convergence_metrics': convergence_metrics
+            'convergence_metrics': convergence_metrics,
+            'qubits_used': qubits_used
         }
 
     def _estimate_cost(self, backend: str, shots_actual_total: int, duration_seconds: Optional[float] = None) -> Optional[float]:
@@ -433,6 +486,7 @@ class JobMetadataLogger:
                     'job_id': f"protein_folding_{start_time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(4).hex()}",
                     'program_name': os.path.basename(sys.argv[0]) if sys.argv else func.__name__,
                     'backend': backend,
+                    'qubits_used': metrics.get('qubits_used') if metrics.get('qubits_used') is not None else '',
                     'environment': env_name,
                     'shots_requested': shots_req if shots_req is not None else '',
                     'shots_actual_total': shots_act,
@@ -471,6 +525,7 @@ class JobMetadataLogger:
                     'job_id': f"protein_folding_{start_time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(4).hex()}",
                     'program_name': os.path.basename(sys.argv[0]) if sys.argv else func.__name__,
                     'backend': backend,
+                    'qubits_used': metrics.get('qubits_used') if metrics.get('qubits_used') is not None else '',
                     'environment': metrics.get('environment') or backend,
                     'shots_requested': metrics.get('shots_requested') if metrics.get('shots_requested') is not None else '',
                     'shots_actual_total': shots_act,

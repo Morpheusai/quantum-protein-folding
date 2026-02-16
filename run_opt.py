@@ -635,7 +635,8 @@ def main():
             "optimization_convergence": {
                 "evaluation_counts": all_conv_data[restart_idx-1]['counts'],
                 "energy_values": all_conv_data[restart_idx-1]['values'],
-                "cumulative_shots": all_conv_data[restart_idx-1]['cumulative_shots']
+                "cumulative_shots": all_conv_data[restart_idx-1]['cumulative_shots'],
+                "iteration_shots": all_conv_data[restart_idx-1]['iteration_shots']
             },
             "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None and len(xyz_data) > 0 else []
         }
@@ -830,6 +831,7 @@ def main():
             "shots_actual_total": int(total_shots),
             "iteration_count": int(total_iters),
             "outcome_summary": f"min_energy={float(best_overall_energy):.6f}",
+            "qubits_used": int(base_ansatz.num_qubits),
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }

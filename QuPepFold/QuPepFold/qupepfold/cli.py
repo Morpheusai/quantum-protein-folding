@@ -50,7 +50,7 @@ def main():
 
     # Optimize CVaR (multi-start)
     print(f"\n[CVaR-VQE] alpha={args.alpha}, tries={args.tries}")
-    best_x, best_cvar, trace = optimize_cvar_multistart(hyper, args.tries, args.alpha)
+    best_x, best_cvar, trace, _tries_info = optimize_cvar_multistart(hyper, args.tries, args.alpha)
     print(f"[CVaR-VQE] best CVaR energy: {best_cvar:.6f}")
 
     # Distribution at optimum (statevector)

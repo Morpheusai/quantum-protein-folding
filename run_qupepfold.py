@@ -298,8 +298,54 @@ def main():
 
     # CVaR-VQE 多起点优化
     print(f"\n[CVaR-VQE] alpha={args.alpha}, 尝试次数={args.tries}")
-    best_x, best_cvar, trace = optimize_cvar_multistart(hyper, args.tries, args.alpha)
+    best_x, best_cvar, trace, tries_info = optimize_cvar_multistart(hyper, args.tries, args.alpha)
     print(f"[CVaR-VQE] 最优CVaR能量: {best_cvar:.6f}")
+
+    # 保存每迭代结果（与 run_qthesis.py / run_opt.py 对齐）
+    try:
+        iterations_dir = output_dir / "iterations"
+        os.makedirs(iterations_dir, exist_ok=True)
+        import json
+        for idx, (info, cvar_val) in enumerate(zip(tries_info, trace), start=1):
+            params = np.asarray(info.get("x", []), float)
+            if params.size == 0:
+                continue
+            qc_iter = build_scalable_ansatz(params, hyper, measure=False)
+            probs_iter = statevector_fold_probs(qc_iter, hyper)
+            if not probs_iter:
+                continue
+            states_iter = list(probs_iter.keys())
+            energies_iter = exact_hamiltonian(states_iter, hyper)
+            s_min_idx = int(min(range(len(states_iter)), key=lambda i: energies_iter[i]))
+            s_min_energy = states_iter[s_min_idx]
+            e_min = float(energies_iter[s_min_idx])
+            cfg_bits = s_min_energy[:num_q_cfg]
+            turns = turns_from_cfg_bits(cfg_bits, turn2qubit)
+            phis, psis = dihedrals_from_turns(turns, len(seq))
+            atoms = build_backbone_3d(seq, phis, psis)
+            xyz_coordinates = [[atom["name"], *atom["coords"]] for atom in atoms]
+            with open(iterations_dir / f"iteration_{idx}_result.json", "w", encoding="utf-8") as f:
+                json.dump({
+                    "index": idx,
+                    "cvar_value": float(cvar_val),
+                    "min_energy": e_min,
+                    "bitstring": s_min_energy,
+                    "shots": int(args.shots),
+                    "backend": args.backend,
+                    "protein_structure": {
+                        "turn_sequence": turns,
+                        "xyz_coordinates": xyz_coordinates
+                    },
+                    "optimization_convergence": {
+                        "evaluation_counts": list(range(1, idx + 1)),
+                        "cvar_values": trace[:idx],
+                        "cumulative_shots": [args.shots * i for i in range(1, idx + 1)],
+                        "iteration_shots": [args.shots] * idx
+                    },
+                    "timestamp": datetime.now().isoformat()
+                }, f, indent=2)
+    except Exception:
+        pass
 
     # 在最优解处计算概率分布 (使用状态向量)
     qc = build_scalable_ansatz(best_x, hyper, measure=False)  # 构建可扩展量子电路
@@ -375,7 +421,7 @@ def main():
         json.dump({
             "backend": args.backend,
             "shots_requested": int(args.shots),
-            "shots_actual_total": 0,
+            "shots_actual_total": int(args.shots) * int(args.tries),
             "iteration_count": int(args.tries),
             "outcome_summary": f"cvar_min={float(best_cvar):.6f}",
             "transpile_metrics": transpile_metrics,

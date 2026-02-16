@@ -193,14 +193,9 @@ def setup_result_analysis(
         tuple[ResultInterpreter, ResultVisualizer]: The result interpreter and visualizer instances.
 
     """
-    timestamp: str = datetime.now(tz=DEFAULT_TIMEZONE).strftime("%Y_%m_%d-%H_%M_%S")
+    # 使用外部配置提供的基础结果目录，不再创建嵌套的时间戳-链序列子目录
     RESULTS_DATA_DIRPATH.mkdir(parents=True, exist_ok=True)
-
-    dirpath: Path = (
-        RESULTS_DATA_DIRPATH
-        / f"{timestamp}-{protein.main_chain!s}-{protein.side_chain!s}"
-    )
-    dirpath.mkdir(parents=True, exist_ok=True)
+    dirpath: Path = RESULTS_DATA_DIRPATH
 
     result_interpreter: ResultInterpreter = ResultInterpreter(
         dirpath=dirpath,

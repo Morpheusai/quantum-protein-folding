@@ -297,17 +297,19 @@ def optimize_cvar_multistart(hyper: Dict, max_iterations: int, alpha: float):
     D = num_angles_for_ansatz(hyper)
     best_x, best_f = None, float("inf")
     trace = []
+    tries_info: List[Dict] = []
     for i in range(max_iterations):
         x0 = rng.uniform(-np.pi, np.pi, size=D)
         f = lambda x: cvar_objective(x, hyper, alpha)
         res = minimize(f, x0, method="Nelder-Mead",
                        options={"maxfev": MAX_EVALS_PER_TRY, "xatol":1e-3, "fatol":1e-3})
         trace.append(res.fun)
+        tries_info.append({"x": np.asarray(res.x, float).tolist(), "fun": float(res.fun)})
         if res.fun < best_f:
             best_f, best_x = res.fun, res.x
         pct = (i+1)*100.0/max_iterations
         print(f"Iteration {i+1}/{max_iterations} completed — {pct:.1f}%")
-    return best_x, best_f, trace
+    return best_x, best_f, trace, tries_info
 
 # ======================================================================================
 # 3D builder + PDB writer with CONECT

@@ -625,6 +625,34 @@ def run_qaoa(
     save_csv_result(csv_path, result_dict)
     print(f"Results saved to: {csv_path}")
     
+    try:
+        iterations_dir = output_path / "iterations"
+        os.makedirs(iterations_dir, exist_ok=True)
+        import json as _json
+        for idx, energy in enumerate(tracker.energy_history, start=1):
+            payload = {
+                "index": idx,
+                "eval_count": idx,
+                "energy": float(energy),
+                "shots": int(shots),
+                "backend": backend,
+                "optimization_convergence": {
+                    "evaluation_counts": list(range(1, idx + 1)),
+                    "energy_values": [float(e) for e in tracker.energy_history[:idx]],
+                    "cumulative_shots": [int(shots) * i for i in range(1, idx + 1)],
+                    "iteration_shots": [int(shots)] * idx
+                },
+                "protein_structure": {
+                    "turn_sequence": [],
+                    "xyz_coordinates": []
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+            with (iterations_dir / f"iteration_{idx}_result.json").open("w", encoding="utf-8") as f:
+                _json.dump(payload, f, indent=2)
+    except Exception:
+        pass
+    
     if len(tracker.energy_history) > 0:
         plot_energy_convergence(
             tracker.iteration_history,
@@ -710,6 +738,38 @@ def run_simulated_annealing(
     
     save_csv_result(csv_path, result_dict)
     print(f"Results saved to: {csv_path}")
+    
+    try:
+        iterations_dir = output_path / "iterations"
+        os.makedirs(iterations_dir, exist_ok=True)
+        import json as _json
+        # 如果 dual_annealing 未抛 FoundGroundState，无法收集能量轨迹，按调用次数记录空能量
+        total_iters = int(tracker.calls)
+        energies = getattr(tracker, "energy_history", [])
+        for idx in range(1, total_iters + 1):
+            energy_val = float(energies[idx - 1]) if idx - 1 < len(energies) else None
+            payload = {
+                "index": idx,
+                "eval_count": idx,
+                "energy": energy_val,
+                "shots": 0,
+                "backend": "classical",
+                "optimization_convergence": {
+                    "evaluation_counts": list(range(1, idx + 1)),
+                    "energy_values": [float(e) for e in energies[:idx]] if energies else [],
+                    "cumulative_shots": [0] * idx,
+                    "iteration_shots": [0] * idx
+                },
+                "protein_structure": {
+                    "turn_sequence": [],
+                    "xyz_coordinates": []
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+            with (iterations_dir / f"iteration_{idx}_result.json").open("w", encoding="utf-8") as f:
+                _json.dump(payload, f, indent=2)
+    except Exception:
+        pass
     
     return result_dict
 

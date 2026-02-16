@@ -159,3 +159,4 @@ cython_debug/
 #.idea/
 protein_folding_jobs.csv
 results/
+protein_folding_jobs_detailed.csv

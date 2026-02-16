@@ -221,6 +221,54 @@ def main() -> None:
         vqe_iterations=counts,
         vqe_energies=values,
     )
+    try:
+        from datetime import datetime
+        iter_dir = result_interpreter._dirpath / "iterations"
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        # 准备最终蛋白质结构信息（用于每次迭代记录中包含空间坐标）
+        turns = []
+        try:
+            turns = [getattr(t, "name", str(t)) for t in result_interpreter.turn_sequence]
+        except Exception:
+            turns = []
+        xyz_data = []
+        try:
+            for bead in result_interpreter.coordinates_3d:
+                symbol = getattr(bead, "symbol", None)
+                x = float(getattr(bead, "x", 0.0))
+                y = float(getattr(bead, "y", 0.0))
+                z = float(getattr(bead, "z", 0.0))
+                xyz_data.append([symbol, x, y, z])
+        except Exception:
+            xyz_data = []
+        for idx, (iter_count, energy) in enumerate(zip(counts, values)):
+            cumulative_shots = [int(args.shots) * i for i in range(1, idx + 2)]
+            iteration_shots = [int(args.shots)] * (idx + 1)
+            payload = {
+                "index": idx + 1,
+                "eval_count": int(iter_count),
+                "energy": float(energy),
+                "shots": int(args.shots),
+                "backend": args.backend,
+                "main_chain_sequence": main_chain,
+                "shots_requested": int(args.shots),
+                "optimization_convergence": {
+                    "evaluation_counts": [int(c) for c in counts[:idx+1]],
+                    "energy_values": [float(e) for e in values[:idx+1]],
+                    "cumulative_shots": cumulative_shots,
+                    "iteration_shots": iteration_shots
+                },
+                "protein_structure": {
+                    "turn_sequence": turns,
+                    "xyz_coordinates": xyz_data
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+            with (iter_dir / f"iteration_{idx + 1}_result.json").open("w", encoding="utf-8") as f:
+                import json as _json
+                _json.dump(payload, f, indent=2)
+    except Exception:
+        pass
 
     result_interpreter.dump_results_to_files()
 

@@ -171,7 +171,7 @@ def main() -> None:
         main_chain=main_chain, side_chain=side_chain
     )
 
-    _, compressed_h = build_and_compress_hamiltonian(
+    original_h, compressed_h = build_and_compress_hamiltonian(
         protein=protein,
         interaction=interaction,
         contact_map=contact_map,
@@ -291,6 +291,7 @@ def main() -> None:
             "iteration_count": int(len(counts)) if isinstance(counts, list) else 0,
             "outcome_summary": f"min_energy={float(min(values)):.6f}" if isinstance(values, list) and len(values) > 0 else "",
             "qubits_used": int(compressed_h.num_qubits),
+            "qubits_full": int(original_h.num_qubits),
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }

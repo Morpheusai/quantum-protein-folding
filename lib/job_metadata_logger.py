@@ -114,6 +114,7 @@ class JobMetadataLogger:
             'shots_requested',
             'shots_actual_total',
             'qubits_used',
+            'qubits_full',
             'estimated_cost',
             'environment',
             'shots_consistent',
@@ -133,6 +134,7 @@ class JobMetadataLogger:
             'program_name': '入口脚本名称',
             'backend': '量子后端名称',
             'qubits_used': '实际量子位数',
+            'qubits_full': '展开的量子位数',
             'environment': '运行环境标签',
             'shots_requested': '请求的每迭代采样次数',
             'shots_actual_total': '实际累积采样次数',
@@ -239,6 +241,7 @@ class JobMetadataLogger:
                 transpile_metrics = m.get('transpile_metrics', transpile_metrics)
                 convergence_metrics = m.get('convergence_metrics', convergence_metrics)
                 qubits_used = m.get('qubits_used', qubits_used)
+                qubits_full = m.get('qubits_full', None)
                 return {
                     'backend': backend,
                     'environment': environment,
@@ -248,7 +251,8 @@ class JobMetadataLogger:
                     'outcome_summary': outcome_summary,
                     'transpile_metrics': transpile_metrics,
                     'convergence_metrics': convergence_metrics,
-                    'qubits_used': qubits_used
+                    'qubits_used': qubits_used,
+                    'qubits_full': qubits_full
                 }
         except Exception:
             pass
@@ -262,7 +266,8 @@ class JobMetadataLogger:
                 'outcome_summary': outcome_summary,
                 'transpile_metrics': transpile_metrics,
                 'convergence_metrics': convergence_metrics,
-                'qubits_used': qubits_used
+                'qubits_used': qubits_used,
+                'qubits_full': None
             }
         for root, _, files in os.walk(result_dir):
             for name in files:
@@ -281,6 +286,8 @@ class JobMetadataLogger:
                                 qubits_used = int(data.get('qubits_used'))
                             elif 'num_qubits' in data and isinstance(data.get('num_qubits'), int):
                                 qubits_used = int(data.get('num_qubits'))
+                        if 'qubits_full' in data and isinstance(data.get('qubits_full'), int):
+                            qubits_full = int(data.get('qubits_full'))
                         # 迭代级实际shots
                         if 'actual_shots' in data and isinstance(data.get('actual_shots'), int):
                             shots_actual_total += int(data.get('actual_shots') or 0)
@@ -364,7 +371,8 @@ class JobMetadataLogger:
             'outcome_summary': outcome_summary,
             'transpile_metrics': transpile_metrics,
             'convergence_metrics': convergence_metrics,
-            'qubits_used': qubits_used
+            'qubits_used': qubits_used,
+            'qubits_full': locals().get('qubits_full', None)
         }
 
     def _estimate_cost(self, backend: str, shots_actual_total: int, duration_seconds: Optional[float] = None) -> Optional[float]:
@@ -487,6 +495,7 @@ class JobMetadataLogger:
                     'program_name': os.path.basename(sys.argv[0]) if sys.argv else func.__name__,
                     'backend': backend,
                     'qubits_used': metrics.get('qubits_used') if metrics.get('qubits_used') is not None else '',
+                    'qubits_full': metrics.get('qubits_full') if metrics.get('qubits_full') is not None else '',
                     'environment': env_name,
                     'shots_requested': shots_req if shots_req is not None else '',
                     'shots_actual_total': shots_act,
@@ -526,6 +535,7 @@ class JobMetadataLogger:
                     'program_name': os.path.basename(sys.argv[0]) if sys.argv else func.__name__,
                     'backend': backend,
                     'qubits_used': metrics.get('qubits_used') if metrics.get('qubits_used') is not None else '',
+                    'qubits_full': metrics.get('qubits_full') if metrics.get('qubits_full') is not None else '',
                     'environment': metrics.get('environment') or backend,
                     'shots_requested': metrics.get('shots_requested') if metrics.get('shots_requested') is not None else '',
                     'shots_actual_total': shots_act,

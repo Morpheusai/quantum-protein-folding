@@ -425,6 +425,7 @@ def main():
             "iteration_count": int(args.tries),
             "outcome_summary": f"cvar_min={float(best_cvar):.6f}",
             "qubits_used": int(num_q_cfg + num_q_int + 1),
+            "qubits_full": int(num_q_cfg + num_q_int + 1),
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }, f, indent=2)

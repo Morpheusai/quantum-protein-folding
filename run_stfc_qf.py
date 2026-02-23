@@ -972,6 +972,7 @@ def main():
             "iteration_count": 0,
             "outcome_summary": "",
             "qubits_used": qubits_used,
+            "qubits_full": qubits_used,
             "transpile_metrics": {},
             "convergence_metrics": {}
         }

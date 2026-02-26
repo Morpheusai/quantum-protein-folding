@@ -104,14 +104,17 @@ def build_and_compress_hamiltonian(
 
 def setup_vqe_optimization(
     num_qubits: int,
-) -> tuple[SamplingVQE, list[int], list[float]]:
+    shots: int = 100,
+) -> tuple[SamplingVQE, list[int], list[float], dict[str, Any]]:
     """Setup the VQE optimization process.
 
     Args:
         num_qubits (int): Number of qubits for the ansatz.
+        shots (int): Number of shots per iteration.
 
     Returns:
-        tuple[SamplingVQE, list[int], list[float]]: The VQE instance, evaluation counts (iterations), and their respective energy values.
+        tuple[SamplingVQE, list[int], list[float], dict[str, Any]]: The VQE instance, evaluation counts (iterations), 
+        their respective energy values, and circuit information dictionary.
 
     """
     optimizer = COBYLA(maxiter=50)
@@ -120,6 +123,15 @@ def setup_vqe_optimization(
 
     counts: list[int] = []
     values: list[float] = []
+    
+    circuit_info: dict[str, Any] = {
+        'total_gates': [],
+        'single_qubit_gates': [],
+        'two_qubit_gates': [],
+        'circuit_depth': [],
+        'shots': [],
+        'cumulative_shots': []
+    }
 
     def _store_intermediate_result(
         eval_count: int,
@@ -130,6 +142,19 @@ def setup_vqe_optimization(
         """Callback to store intermediate VQE results."""
         counts.append(eval_count)
         values.append(mean)
+        
+        decomposed_circuit = ansatz.decompose()
+        total_gates = decomposed_circuit.size()
+        single_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 1)
+        two_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 2)
+        circuit_depth = decomposed_circuit.depth()
+        
+        circuit_info['total_gates'].append(total_gates)
+        circuit_info['single_qubit_gates'].append(single_qubit_gates)
+        circuit_info['two_qubit_gates'].append(two_qubit_gates)
+        circuit_info['circuit_depth'].append(circuit_depth)
+        circuit_info['shots'].append(shots)
+        circuit_info['cumulative_shots'].append(shots * len(counts))
 
     sampler, backend = get_sampler()
     if backend is not None:
@@ -144,7 +169,7 @@ def setup_vqe_optimization(
         callback=_store_intermediate_result,
     )
 
-    return vqe, counts, values
+    return vqe, counts, values, circuit_info
 
 
 def run_vqe_optimization(

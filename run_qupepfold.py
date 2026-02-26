@@ -300,6 +300,55 @@ def main():
     print(f"\n[CVaR-VQE] alpha={args.alpha}, 尝试次数={args.tries}")
     best_x, best_cvar, trace, tries_info = optimize_cvar_multistart(hyper, args.tries, args.alpha)
     print(f"[CVaR-VQE] 最优CVaR能量: {best_cvar:.6f}")
+    
+    # 收集每次迭代的电路信息
+    iteration_details = []
+    for idx, (info, cvar_val) in enumerate(zip(tries_info, trace), start=1):
+        params = np.asarray(info.get("x", []), float)
+        if params.size == 0:
+            continue
+        qc_iter = build_scalable_ansatz(params, hyper, measure=False)
+        decomposed_circuit = qc_iter.decompose()
+        total_gates = decomposed_circuit.size()
+        single_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 1)
+        two_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 2)
+        circuit_depth = decomposed_circuit.depth()
+        
+        iteration_details.append({
+            'trial_idx': 1,
+            'iteration': idx,
+            'backend': args.backend,
+            'total_gates': total_gates,
+            'single_qubit_gates': single_qubit_gates,
+            'two_qubit_gates': two_qubit_gates,
+            'circuit_depth': circuit_depth,
+            'shots': int(args.shots),
+            'energy': float(cvar_val),
+            'cumulative_shots': int(args.shots) * idx,
+            'cvar_energy': float(cvar_val)
+        })
+    
+    # 生成 iteration_details.csv 文件
+    iteration_csv_path = output_dir / "iteration_details.csv"
+    with open(iteration_csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 
+                       'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+        for detail in iteration_details:
+            writer.writerow([
+                detail['trial_idx'],
+                detail['iteration'],
+                detail['backend'],
+                detail['total_gates'],
+                detail['single_qubit_gates'],
+                detail['two_qubit_gates'],
+                detail['circuit_depth'],
+                detail['shots'],
+                detail['energy'],
+                detail['cumulative_shots'],
+                detail['cvar_energy']
+            ])
+    print(f"Iteration details saved to {iteration_csv_path}")
 
     # 保存每迭代结果（与 run_qthesis.py / run_opt.py 对齐）
     try:

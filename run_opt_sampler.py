@@ -16,6 +16,7 @@ import sys
 import warnings
 import datetime
 import json
+import csv
 import numpy as np
 import copy
 # 环境配置
@@ -289,6 +290,7 @@ def main():
     from protein_folding.peptide.peptide import Peptide
     from protein_folding.protein_folding_problem import ProteinFoldingProblem
     from protein_folding.penalty_parameters import PenaltyParameters
+    from protein_folding.protein_folding_result import ProteinFoldingResult
     from src.protein_folding.utils.detailed_pdb_generator import convert_xyz_to_detailed_pdb
 
     # 1. 构建蛋白质折叠问题模型
@@ -364,6 +366,17 @@ def main():
     best_energy = float('inf')
     best_results_tuple = None # 将在第一次实验后初始化
     best_trial_idx = 1
+    
+    # 创建全局 iteration_details.csv 文件（在 RESULT_DIR 层）
+    iteration_csv_path = os.path.join(RESULT_DIR, "iteration_details.csv")
+    try:
+        with open(iteration_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+        print(f"✓ 已创建全局迭代记录文件: {iteration_csv_path}")
+    except Exception as e:
+        print(f"⚠ 创建 CSV 文件失败: {e}")
+        iteration_csv_path = None
     
     # 开始 Multi-Restart 循环
     for trial_idx in range(args.restarts):
@@ -449,6 +462,40 @@ def main():
             if len(convergence_history) % 2 == 0:
                 print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}, 实际shots = {actual_shots}")
             
+            # 计算量子电路指标
+            ops = transpiled_circuit.count_ops()
+            if len(convergence_history) == 1:
+                print(f"    电路门操作详情: {ops}")
+            single_qubit_gates = sum(ops.get(gate, 0) for gate in ['h', 'rx', 'ry', 'rz', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg', 'u1', 'u2', 'u3', 'p'])
+            two_qubit_gates = sum(ops.get(gate, 0) for gate in ['cx', 'cz', 'swap', 'ecr', 'rxx', 'ryy', 'rzz'])
+            circuit_depth = transpiled_circuit.depth()
+            if len(convergence_history) == 1:
+                print(f"    门统计: 单比特={single_qubit_gates}, 双比特={two_qubit_gates}, 总计={single_qubit_gates + two_qubit_gates}, 深度={circuit_depth}")
+            
+            # 生成蛋白质结构信息
+            protein_structure_info = {}
+            if top_results:
+                best_bitstring = top_results[0][0]
+                try:
+                    # 使用 ProteinFoldingResult 解析蛋白质结构
+                    raw_result = MockResult({best_bitstring: 1.0}, top_results[0][1], {best_bitstring: top_results[0][2]}, actual_shots)
+                    protein_result = problem.interpret(raw_result)
+                    
+                    # 获取转向序列
+                    turn_sequence = protein_result.turn_sequence
+                    
+                    # 获取 XYZ 坐标
+                    xyz_data = protein_result.protein_shape_file_gen.get_xyz_data()
+                    xyz_coordinates = [[row[0], float(row[1]), float(row[2]), float(row[3])] for row in xyz_data] if xyz_data is not None else []
+                    
+                    protein_structure_info = {
+                        "turn_sequence": turn_sequence,
+                        "xyz_coordinates": xyz_coordinates,
+                        "best_bitstring": best_bitstring
+                    }
+                except Exception as e:
+                    protein_structure_info = {"error": str(e), "best_bitstring": best_bitstring}
+            
             iteration_data = {
                 "iteration": len(convergence_history),
                 "cvar_energy": energy,
@@ -456,14 +503,48 @@ def main():
                 "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
                 "total_counts": len(counts),
                 "actual_shots": actual_shots,
-                "counts": counts, # 完整计数以供后续分析
-                "protein_structure": {"best_bitstring": top_results[0][0] if top_results else ""}
+                "counts": counts,
+                "single_qubit_gates": single_qubit_gates,
+                "two_qubit_gates": two_qubit_gates,
+                "circuit_depth": circuit_depth,
+                "protein_structure": protein_structure_info
             }
             iteration_results.append(iteration_data)
             
-            # 保存单轮迭代
+            # 保存单轮迭代 JSON
             with open(os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json'), 'w') as f:
-                json.dump({"iteration": iteration_data["iteration"], "cvar_energy": energy, "top_results": [{"bitstring": r[0], "energy": r[1]} for r in iteration_data["top_results"]]}, f, indent=2)
+                json.dump({
+                    "iteration": iteration_data["iteration"],
+                    "cvar_energy": energy,
+                    "top_results": [{"bitstring": r[0], "energy": r[1]} for r in iteration_data["top_results"]],
+                    "single_qubit_gates": single_qubit_gates,
+                    "two_qubit_gates": two_qubit_gates,
+                    "circuit_depth": circuit_depth,
+                    "shots": actual_shots,
+                    "protein_structure": protein_structure_info
+                }, f, indent=2)
+            
+            # 写入 CSV 记录
+            if iteration_csv_path:
+                try:
+                    total_gates = single_qubit_gates + two_qubit_gates
+                    with open(iteration_csv_path, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            trial_idx + 1,
+                            len(convergence_history),
+                            args.backend,
+                            total_gates,
+                            single_qubit_gates,
+                            two_qubit_gates,
+                            circuit_depth,
+                            actual_shots,
+                            energy,
+                            cumulative_shots_history[-1] if cumulative_shots_history else 0,
+                            energy
+                        ])
+                except Exception as e:
+                    print(f"⚠ 写入 CSV 失败: {e}")
             
             return energy
 

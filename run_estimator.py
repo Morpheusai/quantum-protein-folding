@@ -20,6 +20,7 @@ import os
 import sys
 import warnings
 import json
+import csv
 
 # 设置路径和编码环境
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -80,7 +81,7 @@ parser.add_argument('--initial_params', type=str, default=None, help='Warm-Start
 args = parser.parse_args()
 
 
-def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, result_dir=None, problem=None, sampler=None):
+def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, result_dir=None, problem=None, sampler=None, trial_idx=1, iteration_csv_path=None):
     """
     执行单次VQE迭代
     
@@ -93,13 +94,15 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, resu
         result_dir: 结果目录（可选，用于保存每步迭代结果）
         problem: 蛋白质折叠问题对象（可选）
         sampler: 量子采样器（可选）
+        trial_idx: 实验索引（可选）
+        iteration_csv_path: 迭代CSV文件路径（可选）
         
     Returns:
         tuple: (VQE结果, 收敛数据字典)
     """
     return QuantumOptimizer.create_vqe_optimizer(
         qubit_op, ansatz, optimizer, estimator, backend, args, 
-        result_dir=result_dir, problem=problem, sampler=sampler
+        result_dir=result_dir, problem=problem, sampler=sampler, trial_idx=trial_idx, iteration_csv_path=iteration_csv_path
     )
 
 
@@ -205,6 +208,17 @@ def main():
     all_conv_data = []
     global_candidates = [] # [(bitstring, energy, restart_index)]
 
+    # 创建全局 iteration_details.csv 文件（在 result_dir 层）
+    iteration_csv_path = os.path.join(result_dir, "iteration_details.csv")
+    try:
+        with open(iteration_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+        print(f"✓ 已创建全局迭代记录文件: {iteration_csv_path}")
+    except Exception as e:
+        print(f"⚠ 创建 CSV 文件失败: {e}")
+        iteration_csv_path = None
+
     # =========================================================================
     # 7. 执行多轮VQE优化 (Multi-Restart)
     # =========================================================================
@@ -230,7 +244,8 @@ def main():
         raw_result, conv_data = run_vqe_iteration(
             qubit_op, base_ansatz, optimizer, 
             backend_info['estimator'], backend_info.get('backend'),
-            result_dir=trial_dir, problem=problem, sampler=backend_info.get('sampler_v2')
+            result_dir=trial_dir, problem=problem, sampler=backend_info.get('sampler_v2'),
+            trial_idx=i+1, iteration_csv_path=iteration_csv_path
         )
         
         # 设置结果标签

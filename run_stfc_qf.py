@@ -127,6 +127,14 @@ class GroundStateTracker:
         self.qiskit_version = qiskit_version
         self.energy_history = []
         self.iteration_history = []
+        self.circuit_info = {
+            'total_gates': [],
+            'single_qubit_gates': [],
+            'two_qubit_gates': [],
+            'circuit_depth': [],
+            'shots': [],
+            'cumulative_shots': []
+        }
 
     def callback(self, *args):
         if self.qiskit_version == 2:
@@ -150,6 +158,8 @@ class GroundStateTracker:
                 if len(args) >= 3:
                     self.energy_history.append(float(args[2]))
                     self.iteration_history.append(self.iterations)
+                    self.circuit_info['shots'].append(self.args.shots)
+                    self.circuit_info['cumulative_shots'].append(self.num_shots)
         else:
             all_bitstrings = args[0]
             if self.int_ground_state in all_bitstrings:
@@ -590,6 +600,27 @@ def run_qaoa(
         
         print("Running QAOA optimization...")
         result = qaoa.compute_minimum_eigenvalue(q_hamiltonian)
+        
+        # 收集电路信息
+        try:
+            if hasattr(qaoa, 'ansatz'):
+                circuit = qaoa.ansatz
+                decomposed_circuit = circuit.decompose()
+                
+                # 统计门数量
+                single_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 1)
+                two_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 2)
+                total_gates = single_qubit_gates + two_qubit_gates
+                circuit_depth = decomposed_circuit.depth()
+                
+                # 更新 tracker 中的电路信息
+                for i in range(len(tracker.energy_history)):
+                    tracker.circuit_info['total_gates'].append(total_gates)
+                    tracker.circuit_info['single_qubit_gates'].append(single_qubit_gates)
+                    tracker.circuit_info['two_qubit_gates'].append(two_qubit_gates)
+                    tracker.circuit_info['circuit_depth'].append(circuit_depth)
+        except Exception as e:
+            print(f"收集电路信息时出错: {e}")
     
     if hasattr(result, 'best_measurement') and result.best_measurement:
         if result.best_measurement['state'] == int_ground_state:
@@ -624,6 +655,37 @@ def run_qaoa(
     
     save_csv_result(csv_path, result_dict)
     print(f"Results saved to: {csv_path}")
+    
+    # 生成 iteration_details.csv 文件
+    iteration_csv_path = output_path / "iteration_details.csv"
+    with open(iteration_csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 
+                       'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+        for idx, energy in enumerate(tracker.energy_history, start=1):
+            trial_idx = 1
+            iteration = idx
+            total_gates = tracker.circuit_info['total_gates'][idx-1] if idx-1 < len(tracker.circuit_info['total_gates']) else 0
+            single_qubit_gates = tracker.circuit_info['single_qubit_gates'][idx-1] if idx-1 < len(tracker.circuit_info['single_qubit_gates']) else 0
+            two_qubit_gates = tracker.circuit_info['two_qubit_gates'][idx-1] if idx-1 < len(tracker.circuit_info['two_qubit_gates']) else 0
+            circuit_depth = tracker.circuit_info['circuit_depth'][idx-1] if idx-1 < len(tracker.circuit_info['circuit_depth']) else 0
+            shots_val = tracker.circuit_info['shots'][idx-1] if idx-1 < len(tracker.circuit_info['shots']) else shots
+            cumulative_shots = tracker.circuit_info['cumulative_shots'][idx-1] if idx-1 < len(tracker.circuit_info['cumulative_shots']) else shots * idx
+            cvar_energy = float(energy)
+            writer.writerow([
+                trial_idx,
+                iteration,
+                backend,
+                total_gates,
+                single_qubit_gates,
+                two_qubit_gates,
+                circuit_depth,
+                shots_val,
+                float(energy),
+                cumulative_shots,
+                cvar_energy
+            ])
+    print(f"Iteration details saved to {iteration_csv_path}")
     
     try:
         iterations_dir = output_path / "iterations"

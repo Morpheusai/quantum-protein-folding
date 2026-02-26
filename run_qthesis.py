@@ -178,7 +178,7 @@ def main() -> None:
         distance_map=distance_map,
     )
 
-    vqe, counts, values = setup_vqe_optimization(num_qubits=compressed_h.num_qubits)
+    vqe, counts, values, circuit_info = setup_vqe_optimization(num_qubits=compressed_h.num_qubits, shots=args.shots)
 
     print("\n" + "=" * 60)
     print("run_qthesis.py - Qubit 和 Shot 信息")
@@ -221,6 +221,27 @@ def main() -> None:
         vqe_iterations=counts,
         vqe_energies=values,
     )
+    
+    import constants
+    iteration_csv_path = Path(constants.RESULTS_DATA_DIRPATH) / "iteration_details.csv"
+    
+    with open(iteration_csv_path, 'w', encoding='utf-8') as f:
+        f.write('trial_idx,iteration,backend,total_gates,single_qubit_gates,two_qubit_gates,circuit_depth,shots,energy,cumulative_shots,cvar_energy\n')
+        for i in range(len(counts)):
+            trial_idx = 1
+            iteration = i + 1
+            backend = args.backend
+            total_gates = circuit_info['total_gates'][i] if i < len(circuit_info['total_gates']) else 0
+            single_qubit_gates = circuit_info['single_qubit_gates'][i] if i < len(circuit_info['single_qubit_gates']) else 0
+            two_qubit_gates = circuit_info['two_qubit_gates'][i] if i < len(circuit_info['two_qubit_gates']) else 0
+            circuit_depth = circuit_info['circuit_depth'][i] if i < len(circuit_info['circuit_depth']) else 0
+            shots = circuit_info['shots'][i] if i < len(circuit_info['shots']) else args.shots
+            energy = values[i] if i < len(values) else 0
+            cumulative_shots = circuit_info['cumulative_shots'][i] if i < len(circuit_info['cumulative_shots']) else 0
+            cvar_energy = energy
+            f.write(f'{trial_idx},{iteration},{backend},{total_gates},{single_qubit_gates},{two_qubit_gates},{circuit_depth},{shots},{energy},{cumulative_shots},{cvar_energy}\n')
+    
+    logger.info(f"Iteration details saved to {iteration_csv_path}")
     try:
         from datetime import datetime
         iter_dir = result_interpreter._dirpath / "iterations"

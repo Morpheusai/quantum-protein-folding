@@ -21,6 +21,7 @@ import sys
 import warnings
 import datetime
 import json
+import csv
 import numpy as np
 import copy
 # 设置UTF-8环境以解决Windows编码问题并配置模块路径
@@ -34,9 +35,6 @@ from lib.job_metadata_logger import JobMetadataLogger
 
 # 创建元数据记录器实例
 metadata_logger = JobMetadataLogger("protein_folding_jobs_detailed.csv")
-
-# 引入优化器包装组件和 Job 记录器
-from lib.quantum_optimizer import JobRecorder, AdaptiveEstimatorV2, StructuralLoggingEstimator
 # 1. 图形后端配置：设置非GUI后端以解决服务器环境下的显示问题
 # 在服务器环境下，无头模式运行，避免因缺少显示设备而引发的 RuntimeError
 import matplotlib
@@ -85,6 +83,108 @@ class MockResult:
     def __init__(self, eigenstate, eigenvalue):
         self.eigenstate = eigenstate # 字典 {bitstring: prob}
         self.eigenvalue = eigenvalue
+
+class JobRecorder:
+    """AWS 任务记录器，用于持久化 Job ID 以防丢失"""
+    
+    @staticmethod
+    def record_job(job, result_dir, label="job"):
+        """记录任务 ID 到文件"""
+        if not result_dir:
+            return
+            
+        jobs_dir = os.path.join(result_dir, "jobs")
+        os.makedirs(jobs_dir, exist_ok=True)
+        
+        try:
+            job_id = "local_simulation"
+            if hasattr(job, 'job_id'):
+                job_id = job.job_id()
+            
+            job_info = {
+                "job_id": job_id,
+                "timestamp": str(np.datetime64('now')),
+                "status": "submitted",
+                "label": label
+            }
+            
+            import datetime
+            ts = datetime.datetime.now().strftime("%H%M%S_%f")
+            job_file = os.path.join(jobs_dir, f"{label}_{ts}.json")
+            
+            with open(job_file, 'w') as f:
+                json.dump(job_info, f, indent=2)
+            
+            print(f"    [AWS 保护] 任务已记录: {job_id} -> {os.path.basename(job_file)}")
+        except Exception as e:
+            print(f"    ⚠ 记录任务失败: {e}")
+
+class AdaptiveEstimatorV2:
+    """EstimatorV2 包装器，支持自适应精度和任务记录"""
+    
+    def __init__(self, base_estimator, args, result_dir=None):
+        self.base_estimator = base_estimator
+        self.args = args
+        self.result_dir = result_dir
+        self.call_count = 0
+        self.max_iter = getattr(args, 'max_optimization_iterations', 100)
+    
+    def run(self, pubs, precision=None):
+        self.call_count += 1
+        
+        label = f"estimator_step_{self.call_count}"
+        
+        # 如果启用了自适应精度
+        if hasattr(self.args, 'adaptive_shots') and self.args.adaptive_shots:
+            min_shots = getattr(self.args, 'min_shots', 100)
+            max_shots = getattr(self.args, 'max_shots', 1000)
+            
+            # 使用简单的进度比例计算当前 shots
+            ratio = min(self.call_count / (self.max_iter * 2), 1.0)
+            current_shots = int(min_shots + (max_shots - min_shots) * ratio)
+            
+            # 将 shots 转换为 precision: precision = 1 / sqrt(shots)
+            adaptive_precision = 1 / (current_shots**0.5)
+            
+            # 如果外部明确传入了更小的 precision，则保留小的那个以保证质量
+            if precision is not None:
+                precision = min(precision, adaptive_precision)
+            else:
+                precision = adaptive_precision
+        
+        job = self.base_estimator.run(pubs, precision=precision)
+        # 记录 Job ID
+        JobRecorder.record_job(job, self.result_dir, label=f"estimator_step_{self.call_count}")
+        return job
+
+class StructuralLoggingEstimator:
+    """Estimator 的包装器，拦截 run 调用以获取完整的参数向量并执行结构解析"""
+    def __init__(self, base_estimator, structural_callback, result_dir=None):
+        self.base_estimator = base_estimator
+        self.structural_callback = structural_callback
+        self.result_dir = result_dir
+        self.call_count = 0
+    
+    def run(self, pubs, precision=None):
+        self.call_count += 1
+        # pubs 是一个列表，每个元素通常是 (ansatz, operator, parameters)
+        for pub in pubs:
+            ansatz, operator, parameters = pub
+            # parameters 可能包含多个点 (评估批次)
+            if parameters.ndim == 1:
+                # 单个评估点
+                self.structural_callback(parameters)
+            else:
+                # 批量评估点
+                for p in parameters:
+                    self.structural_callback(p)
+        
+        job = self.base_estimator.run(pubs, precision=precision)
+        # 记录 Job ID (如果 base_estimator 不是 AdaptiveEstimatorV2，由这里补齐记录)
+        if not isinstance(self.base_estimator, AdaptiveEstimatorV2):
+             JobRecorder.record_job(job, self.result_dir, label=f"struct_step_{self.call_count}")
+             
+        return job
 
 # ====================
 # 量子后端配置与运行逻辑
@@ -233,7 +333,7 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
         from qiskit.primitives import StatevectorEstimator
         return {'backend': None, 'estimator': StatevectorEstimator()}
 
-def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, result_dir=None, problem=None, sampler=None):
+def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, result_dir=None, problem=None, sampler=None, trial_idx=1, iteration_csv_path=None):
     from qiskit_algorithms import VQE
     from qiskit import transpile
 
@@ -250,9 +350,18 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, resu
         'values': [], 
         'cumulative_shots': [], 
         'iteration_shots': [],
+        'single_qubit_gates': [],
+        'two_qubit_gates': [],
+        'circuit_depth': [],
         'best_params': None,
         'best_energy': float('inf')
     }
+    
+    # 迭代结果保存目录
+    iteration_result_dir = None
+    if result_dir:
+        iteration_result_dir = os.path.join(result_dir, "iter_all_results")
+        os.makedirs(iteration_result_dir, exist_ok=True)
     
     def callback(eval_count, parameters, mean, std):
         convergence['counts'].append(eval_count)
@@ -270,82 +379,125 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, resu
         convergence['iteration_shots'].append(current_step_shots)
         convergence['cumulative_shots'].append(sum(convergence['iteration_shots']))
 
+        # 计算电路门数量和深度
+        try:
+            bound_circuit = working_ansatz.assign_parameters({p: v for p, v in zip(working_ansatz.parameters, parameters)})
+            ops = bound_circuit.count_ops()
+            single_qubit_gates = 0
+            two_qubit_gates = 0
+            for op, count in ops.items():
+                if op in ['h', 'x', 'y', 'z', 's', 'sdg', 't', 'tdg', 'rx', 'ry', 'rz', 'u1', 'u2', 'u3']:
+                    single_qubit_gates += count
+                elif op in ['cx', 'cz', 'swap', 'ch', 'cy', 'cs', 'csdg', 'ct', 'ctdg', 'crx', 'cry', 'crz', 'cu1', 'cu2', 'cu3']:
+                    two_qubit_gates += count
+            circuit_depth = bound_circuit.depth()
+            convergence['single_qubit_gates'].append(single_qubit_gates)
+            convergence['two_qubit_gates'].append(two_qubit_gates)
+            convergence['circuit_depth'].append(circuit_depth)
+        except Exception as e:
+            print(f"⚠ 计算电路门数量和深度时出错: {e}")
+            convergence['single_qubit_gates'].append(0)
+            convergence['two_qubit_gates'].append(0)
+            convergence['circuit_depth'].append(0)
+
         # 保存每步迭代的结果 (如果有 result_dir 和 problem)
-        if result_dir and problem:
+        if iteration_result_dir and problem:
             try:
-                save_path = os.path.join(result_dir, f'iteration_{eval_count}_result.json')
-                protein_info = {}
+                save_path = os.path.join(iteration_result_dir, f'iteration_{eval_count}_result.json')
                 
-                if sampler:
-                    sampling_circuit = working_ansatz.copy()
-                    if not sampling_circuit.get_instructions('measure'):
-                         sampling_circuit.measure_all()
-                    
-                    bound_circuit = sampling_circuit.assign_parameters(parameters)
-                    
-                    if hasattr(sampler, 'run'): # SamplerV2
-                        job = sampler.run([bound_circuit], shots=current_step_shots)
-                        res = job.result()
-                        counts = res[0].data.meas.get_counts()
-                    else: # Legacy
-                        job = sampler.run(bound_circuit, shots=current_step_shots)
-                        res = job.result()
-                        counts = res.quasi_dists[0].binary_probabilities()
-                        
-                    best_bs = max(counts, key=counts.get)
-                    
-                    class MockResultIter:
-                        def __init__(self, bs, energy):
-                            self.eigenstate = {bs: 1.0}
-                            self.eigenvalue = energy
-                    
-                    interpreted = problem.interpret(MockResultIter(best_bs, mean))
-                    xyz = interpreted.protein_shape_file_gen.get_xyz_data()
-                    
-                    protein_info = {
-                        "turn_sequence": interpreted.turn_sequence if hasattr(interpreted, 'turn_sequence') else "",
-                        "xyz_coordinates": [list(row) for row in xyz] if xyz is not None else [],
-                        "best_bitstring": best_bs
-                    }
+                protein_info = state.get('last_protein_info', {})
 
                 with open(save_path, 'w') as f:
                     json.dump({
                         "iteration": eval_count,
                         "energy": float(mean),
                         "shots": int(current_step_shots),
-                        "protein_structure": protein_info
+                        "protein_structure": protein_info,
+                        "single_qubit_gates": convergence['single_qubit_gates'][-1],
+                        "two_qubit_gates": convergence['two_qubit_gates'][-1],
+                        "circuit_depth": convergence['circuit_depth'][-1]
                     }, f, indent=2)
+                
+                # 写入 CSV 记录
+                if iteration_csv_path:
+                    try:
+                        single_q = convergence['single_qubit_gates'][-1]
+                        two_q = convergence['two_qubit_gates'][-1]
+                        total_gates = single_q + two_q
+                        with open(iteration_csv_path, 'a', newline='') as f:
+                            writer = csv.writer(f)
+                            writer.writerow([
+                                trial_idx,
+                                eval_count,
+                                args.backend if hasattr(args, 'backend') else 'unknown',
+                                total_gates,
+                                single_q,
+                                two_q,
+                                convergence['circuit_depth'][-1],
+                                current_step_shots,
+                                float(mean),
+                                convergence['cumulative_shots'][-1]
+                            ])
+                    except Exception as e:
+                        print(f"⚠ 写入 CSV 失败: {e}")
             except Exception:
                 pass
 
     # 结构解析回调 (用于 StructuralLoggingEstimator)
+    state = {'last_protein_info': {}}
+    
     def structural_callback(parameters):
-        # 这里的 eval_count 在包装器内部维护，但我们希望与 VQE 的回调同步
-        # 由于它是同步执行且先于 base_estimator.run，
-        # 我们可以暂存当前的评估点，在 VQE 回调触发时使用。
-        # 这里简单的办法是直接在这里解析结构，虽然 eval_count 不精确
-        pass
+        if not (result_dir and problem and sampler):
+            return
+        
+        protein_info = {}
+        try:
+            sampling_circuit = working_ansatz.copy()
+            if not sampling_circuit.get_instructions('measure'):
+                 sampling_circuit.measure_all()
+            
+            param_dict = {p: v for p, v in zip(sampling_circuit.parameters, parameters)}
+            bound_circuit = sampling_circuit.assign_parameters(param_dict)
+            
+            current_step_shots = args.shots if args else 100
+            if hasattr(sampler, 'run'):
+                job = sampler.run([bound_circuit], shots=current_step_shots)
+                sampler_result = job.result()
+                counts = sampler_result[0].data.meas.get_counts()
+            else:
+                job = sampler.run(bound_circuit, shots=current_step_shots)
+                sampler_result = job.result()
+                counts = sampler_result.quasi_dists[0].binary_probabilities()
+            
+            best_bs = max(counts, key=counts.get)
+            
+            class MockResultIter:
+                def __init__(self, bs):
+                    self.eigenstate = {bs: 1.0}
+                    self.eigenvalue = 0.0
+            
+            raw_iter_res = MockResultIter(best_bs)
+            interpreted = problem.interpret(raw_iter_res)
+            xyz = interpreted.protein_shape_file_gen.get_xyz_data()
+            
+            protein_info = {
+                "turn_sequence": interpreted.turn_sequence if hasattr(interpreted, 'turn_sequence') else "",
+                "xyz_coordinates": [list(row) for row in xyz] if xyz is not None else [],
+                "best_bitstring": best_bs
+            }
+        except Exception as e:
+            print(f"⚠ Warning: Structural interpretation in callback failed: {e}")
+            protein_info = {"error": str(e)}
+        
+        state['last_protein_info'] = protein_info
 
     # 最终包装 Estimator
     final_estimator = estimator
     if args.adaptive_shots:
         final_estimator = AdaptiveEstimatorV2(final_estimator, args, result_dir=result_dir)
     
-    # 注意：这里如果要在 run_opt.py 中也启用结构打印，需要实现 structural_callback
-    # 但由于用户说 run_opt.py 本来就能跑，我们就只加上 Job ID 记录的保护
-    if not isinstance(final_estimator, AdaptiveEstimatorV2):
-         # 如果没开启自适应，也要额外包装一层进行 Job 记录
-         class JobLoggingEstimator:
-             def __init__(self, base, r_dir):
-                 self.base = base
-                 self.r_dir = r_dir
-                 self.count = 0
-             def run(self, pubs, precision=None):
-                 self.count += 1
-                 job = self.base.run(pubs, precision=precision)
-                 JobRecorder.record_job(job, self.r_dir, label=f"vqe_step_{self.count}")
-                 return job
-         final_estimator = JobLoggingEstimator(final_estimator, result_dir)
+    # 包装结构解析逻辑
+    final_estimator = StructuralLoggingEstimator(final_estimator, structural_callback, result_dir=result_dir)
 
     # 干跑模式 (Dry-Run)
     if args.dry_run:
@@ -484,10 +636,21 @@ def main():
 
     print(f"\n正在执行 {args.restarts} 轮独立实验 (Multi-Restart)...")
     if args.adaptive_shots:
-        print(f"  - 已启用自适应采样: {args.min_shots} -> {args.max_shots}")
+        print(f"  - 已启用自适应采样: {args.min_shots} -> {args.max_shots}")
     
     best_overall_energy = float('inf')
     best_restart_idx = -1
+
+    # 创建全局 iteration_details.csv 文件（在 RESULT_DIR 层）
+    iteration_csv_path = os.path.join(RESULT_DIR, "iteration_details.csv")
+    try:
+        with open(iteration_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots'])
+        print(f"✓ 已创建全局迭代记录文件: {iteration_csv_path}")
+    except Exception as e:
+        print(f"⚠ 创建 CSV 文件失败: {e}")
+        iteration_csv_path = None
 
     # Define a MockResult class for interpreting bitstrings not directly from VQE
     class MockResult:
@@ -511,7 +674,8 @@ def main():
         raw_result, conv_data = run_vqe_iteration(
             qubit_op, base_ansatz, optimizer, 
             backend_info['estimator'], backend_info.get('backend'),
-            result_dir=trial_dir, problem=problem, sampler=backend_info.get('sampler_v2')
+            result_dir=trial_dir, problem=problem, sampler=backend_info.get('sampler_v2'),
+            trial_idx=i+1, iteration_csv_path=iteration_csv_path
         )
         
         trial_label = f'Run {i+1}'
@@ -636,7 +800,10 @@ def main():
                 "evaluation_counts": all_conv_data[restart_idx-1]['counts'],
                 "energy_values": all_conv_data[restart_idx-1]['values'],
                 "cumulative_shots": all_conv_data[restart_idx-1]['cumulative_shots'],
-                "iteration_shots": all_conv_data[restart_idx-1]['iteration_shots']
+                "iteration_shots": all_conv_data[restart_idx-1]['iteration_shots'],
+                "single_qubit_gates": all_conv_data[restart_idx-1]['single_qubit_gates'],
+                "two_qubit_gates": all_conv_data[restart_idx-1]['two_qubit_gates'],
+                "circuit_depth": all_conv_data[restart_idx-1]['circuit_depth']
             },
             "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None and len(xyz_data) > 0 else []
         }

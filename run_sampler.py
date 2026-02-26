@@ -18,6 +18,7 @@ import os
 import sys
 import warnings
 import json
+import csv
 import numpy as np
 
 # 设置Python环境编码
@@ -213,6 +214,17 @@ def main():
     best_results_tuple = None
     best_trial_idx = -1
     
+    # 创建全局 iteration_details.csv 文件（在 result_dir 层）
+    iteration_csv_path = os.path.join(result_dir, "iteration_details.csv")
+    try:
+        with open(iteration_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+        print(f"✓ 已创建全局迭代记录文件: {iteration_csv_path}")
+    except Exception as e:
+        print(f"⚠ 创建 CSV 文件失败: {e}")
+        iteration_csv_path = None
+    
     # 全局候选池，用于结构去重
     global_candidates = [] # 存储 (bitstring, energy, count) 形式的元组
     
@@ -236,7 +248,8 @@ def main():
             # 调用CVaR优化器
             results_tuple = QuantumOptimizer.create_sampler_optimizer(
                 transpiled_circuit, qubit_op, backend, args, trial_dir, problem, 
-                sampler_v2=backend_info.get('sampler_v2')
+                sampler_v2=backend_info.get('sampler_v2'),
+                trial_idx=trial_idx, iteration_csv_path=iteration_csv_path
             )
             
             # 结果解包: res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history
@@ -380,6 +393,9 @@ def main():
             "top_results": processed_top_results,
             "total_counts": iter_data.get("total_counts", 0),
             "actual_shots": iter_data.get("actual_shots", 0),
+            "single_qubit_gates": iter_data.get("single_qubit_gates", 0),
+            "two_qubit_gates": iter_data.get("two_qubit_gates", 0),
+            "circuit_depth": iter_data.get("circuit_depth", 0),
             "protein_structure": iter_data.get("protein_structure", {})  # 从迭代数据中直接获取蛋白质结构信息
         }
         processed_iteration_results.append(processed_iter)

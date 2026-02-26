@@ -17,6 +17,7 @@ import numpy as np
 from scipy.optimize import minimize
 import os
 import json
+import csv
 import traceback
 
 from lib.energy_calculator import EnergyCalculator
@@ -253,7 +254,7 @@ class QuantumOptimizer:
     
     @staticmethod
     def create_vqe_optimizer(qubit_op, ansatz, optimizer, estimator, backend=None, args=None, 
-                            optimizer_name='COBYLA', result_dir=None, problem=None, sampler=None):
+                            optimizer_name='COBYLA', result_dir=None, problem=None, sampler=None, trial_idx=1, iteration_csv_path=None):
         """
         创建VQE优化器
         
@@ -287,11 +288,20 @@ class QuantumOptimizer:
             'stds': [], 
             'cumulative_shots': [], 
             'iteration_shots': [],
+            'single_qubit_gates': [],
+            'two_qubit_gates': [],
+            'circuit_depth': [],
             'best_params': None,
             'best_energy': float('inf'),
             'all_params': [] # 用于后续采样候选结构
         }
         actual_shots_list = []
+        
+        # 迭代结果保存目录
+        iteration_result_dir = None
+        if result_dir:
+            iteration_result_dir = os.path.join(result_dir, "iter_all_results")
+            os.makedirs(iteration_result_dir, exist_ok=True)
         
         # 内部状态跟踪
         state = {'best_energy': float('inf'), 'best_params': None}
@@ -343,6 +353,36 @@ class QuantumOptimizer:
                 convergence['best_params'] = parameters
                 convergence['best_params_dict'] = state['best_params_dict']
 
+            # 计算电路门数量和深度
+            try:
+                # 绑定参数到电路
+                bound_circuit = working_ansatz.assign_parameters({p: v for p, v in zip(working_ansatz.parameters, parameters)})
+                # 计算门数量
+                ops = bound_circuit.count_ops()
+                # 单比特门数量
+                single_qubit_gates = 0
+                # 双比特门数量
+                two_qubit_gates = 0
+                for op, count in ops.items():
+                    # 常见的单比特门
+                    if op in ['h', 'x', 'y', 'z', 's', 'sdg', 't', 'tdg', 'rx', 'ry', 'rz', 'u1', 'u2', 'u3']:
+                        single_qubit_gates += count
+                    # 常见的双比特门
+                    elif op in ['cx', 'cz', 'swap', 'ch', 'cy', 'cs', 'csdg', 'ct', 'ctdg', 'crx', 'cry', 'crz', 'cu1', 'cu2', 'cu3']:
+                        two_qubit_gates += count
+                # 计算电路深度
+                circuit_depth = bound_circuit.depth()
+                
+                convergence['single_qubit_gates'].append(single_qubit_gates)
+                convergence['two_qubit_gates'].append(two_qubit_gates)
+                convergence['circuit_depth'].append(circuit_depth)
+            except Exception as e:
+                print(f"⚠ 计算电路门数量和深度时出错: {e}")
+                # 如果出错，添加默认值
+                convergence['single_qubit_gates'].append(0)
+                convergence['two_qubit_gates'].append(0)
+                convergence['circuit_depth'].append(0)
+
             # 模拟 shots 逻辑 (EstimatorV2 使用 precision，但为了绘图一致性记录 shots)
             current_step_shots = args.shots if args else 100
             
@@ -361,9 +401,33 @@ class QuantumOptimizer:
             cumulative_shots = sum(actual_shots_list)
             convergence['cumulative_shots'].append(cumulative_shots)
 
+            # 写入 CSV 记录
+            if iteration_csv_path:
+                try:
+                    single_q = convergence['single_qubit_gates'][-1]
+                    two_q = convergence['two_qubit_gates'][-1]
+                    total_gates = single_q + two_q
+                    with open(iteration_csv_path, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            trial_idx,
+                            eval_count,
+                            args.backend if hasattr(args, 'backend') else 'unknown',
+                            total_gates,
+                            single_q,
+                            two_q,
+                            convergence['circuit_depth'][-1],
+                            current_step_shots,
+                            float(mean),
+                            cumulative_shots,
+                            float(mean)
+                        ])
+                except Exception as e:
+                    print(f"⚠ 写入 CSV 失败: {e}")
+
             # 保存每步迭代的结果 (如果有 result_dir 和 problem)
-            if result_dir and problem:
-                save_path = os.path.join(result_dir, f'iteration_{eval_count}_result.json')
+            if iteration_result_dir and problem:
+                save_path = os.path.join(iteration_result_dir, f'iteration_{eval_count}_result.json')
                 
                 # 从 state 中获取由 structural_callback 记录的最新结构信息
                 protein_info = state.get('last_protein_info', {})
@@ -375,6 +439,9 @@ class QuantumOptimizer:
                         "energy": float(mean),
                         "std": float(actual_std),
                         "shots": int(current_step_shots),
+                        "single_qubit_gates": int(convergence['single_qubit_gates'][-1]),
+                        "two_qubit_gates": int(convergence['two_qubit_gates'][-1]),
+                        "circuit_depth": int(convergence['circuit_depth'][-1]),
                         "protein_structure": protein_info
                     }, f, indent=2)
 
@@ -482,7 +549,7 @@ class QuantumOptimizer:
         return result, convergence
     
     @staticmethod
-    def create_sampler_optimizer(transpiled_circuit, qubit_op, backend, args, result_dir=None, problem=None, sampler_v2=None):
+    def create_sampler_optimizer(transpiled_circuit, qubit_op, backend, args, result_dir=None, problem=None, sampler_v2=None, trial_idx=1, iteration_csv_path=None):
         """
         创建Sampler优化器
         
@@ -659,6 +726,32 @@ class QuantumOptimizer:
                          print(f"      -> 自适应Shots: {current_shots}")
                     print(f"    各最优结果能量: {[round(e, 4) for e in top_energies]}")
             
+                # 计算电路门数量和深度
+                try:
+                    # 绑定参数到电路
+                    bound_circuit = transpiled_circuit.assign_parameters(params)
+                    # 计算门数量
+                    ops = bound_circuit.count_ops()
+                    # 单比特门数量
+                    single_qubit_gates = 0
+                    # 双比特门数量
+                    two_qubit_gates = 0
+                    for op, count in ops.items():
+                        # 常见的单比特门
+                        if op in ['h', 'x', 'y', 'z', 's', 'sdg', 't', 'tdg', 'rx', 'ry', 'rz', 'u1', 'u2', 'u3']:
+                            single_qubit_gates += count
+                        # 常见的双比特门
+                        elif op in ['cx', 'cz', 'swap', 'ch', 'cy', 'cs', 'csdg', 'ct', 'ctdg', 'crx', 'cry', 'crz', 'cu1', 'cu2', 'cu3']:
+                            two_qubit_gates += count
+                    # 计算电路深度
+                    circuit_depth = bound_circuit.depth()
+                except Exception as e:
+                    print(f"⚠ 计算电路门数量和深度时出错: {e}")
+                    # 如果出错，添加默认值
+                    single_qubit_gates = 0
+                    two_qubit_gates = 0
+                    circuit_depth = 0
+                
                 iteration_data = {
                     "iteration": len(convergence_history),
                     "cvar_energy": energy,
@@ -667,9 +760,36 @@ class QuantumOptimizer:
                     "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
                     "total_counts": len(counts),
                     "actual_shots": actual_shots,
+                    "single_qubit_gates": single_qubit_gates,
+                    "two_qubit_gates": two_qubit_gates,
+                    "circuit_depth": circuit_depth,
                     "raw_counts": counts
                 }
                 iteration_results.append(iteration_data)
+                
+                # 写入 CSV 记录
+                if iteration_csv_path:
+                    try:
+                        single_q = iteration_data.get("single_qubit_gates", 0)
+                        two_q = iteration_data.get("two_qubit_gates", 0)
+                        total_gates = single_q + two_q
+                        with open(iteration_csv_path, 'a', newline='') as f:
+                            writer = csv.writer(f)
+                            writer.writerow([
+                                trial_idx,
+                                iteration_data["iteration"],
+                                args.backend if hasattr(args, 'backend') else 'unknown',
+                                total_gates,
+                                single_q,
+                                two_q,
+                                iteration_data.get("circuit_depth", 0),
+                                iteration_data.get("actual_shots", 0),
+                                iteration_data.get("cvar_energy", 0),
+                                cumulative_shots_history[-1] if cumulative_shots_history else 0,
+                                iteration_data.get("cvar_energy", 0)
+                            ])
+                    except Exception as e:
+                        print(f"⚠ 写入 CSV 失败: {e}")
                 
                 if iteration_result_dir:
                     protein_structure_info = {}
@@ -711,6 +831,9 @@ class QuantumOptimizer:
                             "top_energies": [float(e) for e in iteration_data["top_energies"]],
                             "total_counts": iteration_data["total_counts"],
                             "actual_shots": iteration_data["actual_shots"],
+                            "single_qubit_gates": int(iteration_data.get("single_qubit_gates", 0)),
+                            "two_qubit_gates": int(iteration_data.get("two_qubit_gates", 0)),
+                            "circuit_depth": int(iteration_data.get("circuit_depth", 0)),
                             "protein_structure": protein_structure_info
                         }
                         json.dump(serializable_data, f, indent=2)

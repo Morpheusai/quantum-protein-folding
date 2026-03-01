@@ -8,11 +8,17 @@
 2. 解决了量子后端测量门冲突问题
 3. 使用VQE算法优化蛋白质折叠能量
 4. 支持多轮独立实验及结果汇总分析
+5. 支持IBM量子硬件噪声模型模拟
 
 兼容性修复：
 1. 解决 AWS 后端 "Cannot measure previously measured qubit" 报错
 2. 强制在每次迭代中使用干净的 Ansatz 副本
 3. 改用Estimator替代Sampler，提高各后端兼容性
+
+噪声模型：
+1. 支持从IBM量子硬件获取真实噪声模型（带本地缓存）
+2. 支持自定义噪声参数（单比特门、双比特门、测量错误率）
+3. 仅本地模拟器（local, local_aer）支持噪声模型
 """
 
 import argparse
@@ -76,6 +82,10 @@ parser.add_argument('--max_shots', type=int, default=1000, help='自适应采样
 parser.add_argument('--aws_region', default=None, help='AWS区域')
 parser.add_argument('--optimizer', default='COBYLA', help='优化器选择: COBYLA (默认), SPSA, SLSQP')
 parser.add_argument('--resilience_level', type=int, default=1, help='IBM Quantum 误差抑制等级 (0-3)，默认1')
+parser.add_argument('--use_noise', action='store_true', help='使用噪声模型模拟真实量子硬件噪声')
+parser.add_argument('--noise_single', type=float, default=0.01, help='单比特门错误率 (默认: 0.01)')
+parser.add_argument('--noise_double', type=float, default=0.05, help='双比特门错误率 (默认: 0.05)')
+parser.add_argument('--noise_meas', type=float, default=0.03, help='测量错误率 (默认: 0.03)')
 parser.add_argument('--resume', type=str, default=None, help='断点续传：指定结果目录以恢复历史任务')
 parser.add_argument('--initial_params', type=str, default=None, help='Warm-Start：从 JSON 文件加载初始参数向量')
 args = parser.parse_args()
@@ -136,6 +146,12 @@ def main():
     print(f"  - 最大结果数量: {args.max_results}")
     print(f"  - 优化器: {args.optimizer}")
     print(f"  - 误差抑制等级: {args.resilience_level}")
+    print(f"  - 噪声模型: {'已启用' if args.use_noise else '已禁用'}")
+    if args.use_noise:
+        print(f"  - 噪声参数:")
+        print(f"    * 单比特门错误率: {args.noise_single}")
+        print(f"    * 双比特门错误率: {args.noise_double}")
+        print(f"    * 测量错误率: {args.noise_meas}")
 
     # =========================================================================
     # 2. 初始化设置
@@ -174,7 +190,17 @@ def main():
     # 4. 配置量子后端和优化器
     # =========================================================================
     print(f"\n正在配置量子后端...")
-    backend_info = QuantumBackendManager.setup_backend(args.backend, args.aws_region, args.shots, use_estimator=True, resilience_level=args.resilience_level)
+    backend_info = QuantumBackendManager.setup_backend(
+        args.backend, 
+        args.aws_region, 
+        args.shots, 
+        use_estimator=True, 
+        resilience_level=args.resilience_level,
+        use_noise=args.use_noise,
+        noise_single=args.noise_single,
+        noise_double=args.noise_double,
+        noise_meas=args.noise_meas
+    )
     
     # 根据参数创建优化器
     if args.optimizer.upper() == 'SPSA':

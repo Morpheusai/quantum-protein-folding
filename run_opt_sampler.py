@@ -8,6 +8,12 @@
 2. 使用CVaR (Conditional Value at Risk) 优化策略
 3. 基于采样的能量计算方法
 4. 支持多轮独立实验及结果汇总分析
+5. 支持IBM量子硬件噪声模型模拟
+
+噪声模型：
+1. 支持从IBM量子硬件获取真实噪声模型（带本地缓存）
+2. 支持自定义噪声参数（单比特门、双比特门、测量错误率）
+3. 仅本地模拟器（local, local_aer）支持噪声模型
 """
 
 import argparse
@@ -46,6 +52,82 @@ import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
+
+# ====================
+# 噪声模型创建
+# ====================
+
+def create_noise_model(p_single=0.01, p_double=0.05, p_meas=0.03):
+    """从IBM量子硬件获取真实噪声模型（带缓存）
+    
+    Args:
+        p_single: 单比特门错误率（当无法连接IBM服务或加载缓存时使用）
+        p_double: 双比特门错误率（当无法连接IBM服务或加载缓存时使用）
+        p_meas: 测量错误率（当无法连接IBM服务或加载缓存时使用）
+    """
+    noise_model_file = "ibm_fez_noise.pkl"
+    
+    # 1. 尝试从本地文件加载噪声模型
+    if os.path.exists(noise_model_file):
+        try:
+            import pickle
+            print("正在从本地缓存加载IBM量子硬件噪声模型...")
+            with open(noise_model_file, "rb") as f:
+                noise_model = pickle.load(f)
+            print("✓ 成功加载本地缓存的噪声模型")
+            return noise_model
+        except Exception as e:
+            print(f"⚠ 加载本地噪声模型失败: {e}")
+            print("  - 将尝试从IBM量子硬件获取新的噪声模型")
+    
+    # 2. 尝试从IBM量子硬件获取噪声模型
+    try:
+        from qiskit_ibm_runtime import QiskitRuntimeService 
+        from qiskit_aer.noise import NoiseModel 
+        import pickle
+        
+        print("正在从IBM量子硬件获取真实噪声模型...")
+        service = QiskitRuntimeService() 
+        backend = service.backend("ibm_fez") 
+        
+        noise_model = NoiseModel.from_backend(backend)
+        print("✓ 成功获取IBM量子硬件噪声模型")
+        print(f"  - 后端名称: {backend.name}")
+        print(f"  - 噪声模型包含的门: {noise_model.basis_gates}")
+        
+        # 保存噪声模型到本地文件
+        try:
+            with open(noise_model_file, "wb") as f:
+                pickle.dump(noise_model, f)
+            print(f"✓ 噪声模型已保存到本地文件: {noise_model_file}")
+        except Exception as e:
+            print(f"⚠ 保存噪声模型到本地文件失败: {e}")
+            print("  - 后续运行将需要重新从IBM量子硬件获取噪声模型")
+        
+        return noise_model
+    except Exception as e:
+        print(f"⚠ 无法从IBM量子硬件获取噪声模型: {e}")
+        print("  - 将使用默认噪声模型作为替代")
+        # 当无法连接IBM服务时，使用默认噪声模型
+        from qiskit_aer.noise import NoiseModel, pauli_error, thermal_relaxation_error
+        
+        noise_model = NoiseModel()
+        
+        # 1. 量子比特翻转错误（单比特门错误）
+        error_single = pauli_error([('X', p_single), ('I', 1 - p_single)])
+        
+        # 2. 双比特门错误
+        error_double = pauli_error([('XX', p_double), ('II', 1 - p_double)])
+        
+        # 3. 添加噪声到门操作
+        noise_model.add_all_qubit_quantum_error(error_single, ['u1', 'u2', 'u3'])
+        noise_model.add_all_qubit_quantum_error(error_double, ['cx'])
+        
+        # 4. 添加测量错误
+        error_meas = pauli_error([('X', p_meas), ('I', 1 - p_meas)])
+        noise_model.add_all_qubit_quantum_error(error_meas, ['measure'])
+        
+        return noise_model
 
 class MockResult:
     """模拟量子结果类，用于解析蛋白质结构"""
@@ -96,6 +178,10 @@ parser.add_argument('--min_shots', type=int, default=100, help='自适应Shots�
 parser.add_argument('--max_shots', type=int, default=2000, help='自适应Shots的最大采样数 (默认为2000)')
 parser.add_argument('--unique_structures', action='store_true', help='开启结构去重：仅返回折叠结构不同的最优结果')
 parser.add_argument('--restarts', type=int, default=1, help='独立实验运行次数 (Multi-Restart)，用于避免局部最优，默认为1')
+parser.add_argument('--use_noise', action='store_true', help='使用噪声模型模拟真实量子硬件噪声')
+parser.add_argument('--noise_single', type=float, default=0.01, help='单比特门错误率 (默认: 0.01)')
+parser.add_argument('--noise_double', type=float, default=0.05, help='双比特门错误率 (默认: 0.05)')
+parser.add_argument('--noise_meas', type=float, default=0.03, help='测量错误率 (默认: 0.03)')
 parser.add_argument('--dry_run', action='store_true', help='干跑模式：仅在真实提交前进行本地预检')
 parser.add_argument('--resume', type=str, default=None, help='断点续传：指定结果目录以恢复历史任务')
 parser.add_argument('--initial_params', type=str, default=None, help='Warm-Start：从 JSON 文件加载初始参数向量')
@@ -103,14 +189,26 @@ args = parser.parse_args()
 
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 RESULT_DIR = os.path.join("results", f"{TIMESTAMP}_{args.backend}_sampler")
+if args.use_noise:
+    RESULT_DIR = RESULT_DIR + "_noise"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 # ====================
 # 量子后端配置与运行逻辑
 # ====================
 
-def setup_sampler_backend(backend_name, aws_region=None, shots=1000):
-    """配置支持采样器模式的量子后端，兼容多种量子云服务，并支持 SamplerV2"""
+def setup_sampler_backend(backend_name, aws_region=None, shots=1000, use_noise=False, noise_single=0.01, noise_double=0.05, noise_meas=0.03):
+    """配置支持采样器模式的量子后端，兼容多种量子云服务，并支持 SamplerV2
+    
+    Args:
+        backend_name: 后端名称
+        aws_region: AWS区域（仅AWS后端需要）
+        shots: 采样次数
+        use_noise: 是否使用噪声模型（仅本地模拟器支持）
+        noise_single: 单比特门错误率
+        noise_double: 双比特门错误率
+        noise_meas: 测量错误率
+    """
     backend_info = {'backend': None, 'sampler_v2': None}
     try:
         if backend_name.lower() == 'aws_sv1':
@@ -162,12 +260,29 @@ def setup_sampler_backend(backend_name, aws_region=None, shots=1000):
         elif backend_name.lower() in ('local_aer', 'local'):
             try:
                 from qiskit_aer import AerSimulator
-                backend = AerSimulator()
+                
+                # 配置模拟器，启用噪声模型（如果需要）
+                simulator_options = {}
+                if use_noise:
+                    noise_model = create_noise_model(p_single=noise_single, p_double=noise_double, p_meas=noise_meas)
+                    simulator_options['noise_model'] = noise_model
+                    print(f"✓ 已启用噪声模型 (单比特: {noise_single}, 双比特: {noise_double}, 测量: {noise_meas})")
+                
+                backend = AerSimulator(**simulator_options)
                 print("✓ 本地 AerSimulator 已就绪")
-                # 初始化本地 SamplerV2
-                from qiskit.primitives import StatevectorSampler
-                backend_info['sampler_v2'] = StatevectorSampler()
-                print("✓ 已配置本地 SamplerV2 (StatevectorSampler)")
+                
+                # 根据是否使用噪声选择合适的 Sampler
+                if use_noise:
+                    # 使用 BackendSamplerV2 以支持噪声模型
+                    from qiskit.primitives import BackendSamplerV2
+                    backend_info['sampler_v2'] = BackendSamplerV2(backend=backend)
+                    backend_info['sampler_v2'].options.default_shots = shots
+                    print("✓ 已配置本地 BackendSamplerV2 (支持噪声模型)")
+                else:
+                    # 使用 StatevectorSampler 进行理想模拟
+                    from qiskit.primitives import StatevectorSampler
+                    backend_info['sampler_v2'] = StatevectorSampler()
+                    print("✓ 已配置本地 StatevectorSampler (理想模拟)")
             except ImportError:
                 from qiskit.providers.basic_provider import BasicSimulator
                 backend = BasicSimulator()
@@ -284,6 +399,13 @@ def extract_top_results(counts, qubit_op, top_n):
 @metadata_logger
 def main():
     print(f"🚀 启动蛋白质折叠计算任务 (采样器模式) | 序列: {args.main_chain}")
+    print(f"  - 噪声模型: {'已启用' if args.use_noise else '已禁用'}")
+    if args.use_noise:
+        print(f"  - 噪声参数:")
+        print(f"    * 单比特门错误率: {args.noise_single}")
+        print(f"    * 双比特门错误率: {args.noise_double}")
+        print(f"    * 测量错误率: {args.noise_meas}")
+    print(f"  - 结果目录: {RESULT_DIR}")
     
     # 导入蛋白质折叠相关模块
     from protein_folding.interactions.miyazawa_jernigan_interaction import MiyazawaJerniganInteraction
@@ -308,7 +430,15 @@ def main():
     num_qubits = qubit_op.num_qubits  # 获取所需量子比特数
 
     # 2. 根据参数选择合适的量子计算后端
-    backend_info = setup_sampler_backend(args.backend, args.aws_region, args.shots)
+    backend_info = setup_sampler_backend(
+        args.backend, 
+        args.aws_region, 
+        args.shots,
+        args.use_noise,
+        noise_single=args.noise_single,
+        noise_double=args.noise_double,
+        noise_meas=args.noise_meas
+    )
     backend = backend_info['backend']
     sampler_v2 = backend_info['sampler_v2']
     print(f"✓ 量子后端已就绪 | 量子比特数: {num_qubits}")

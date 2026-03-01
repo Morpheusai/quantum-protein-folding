@@ -5,18 +5,26 @@
 
 使用示例:
     python run_qthesis.py
-    python run_qthesis.py --main_chain "APRLRFY" --backend local_statevector
+    python run_qthesis.py --main_chain "APRLRFY" --backend local_statevector --use_noise
 
 特性:
     - 通过命令行参数配置
     - 动态覆盖 constants 模块的配置
     - 输出到根目录的 results 文件夹
     - 无需修改原始 qthesis-pf 代码
+    - 支持本地模拟器噪声模型
+
+噪声模型:
+    - 支持从IBM量子硬件获取真实噪声模型（带本地缓存）
+    - 支持自定义噪声参数（单比特门、双比特门、测量错误率）
+    - 仅本地模拟器支持噪声模型
 """
 
 import argparse
 import os
 import sys
+import json
+import csv
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,6 +32,79 @@ if TYPE_CHECKING:
     from qiskit_algorithms import SamplingMinimumEigensolverResult
 
 from lib.job_metadata_logger import JobMetadataLogger
+
+
+def create_noise_model(p_single=0.01, p_double=0.05, p_meas=0.03):
+    """从IBM量子硬件获取真实噪声模型（带缓存）
+    
+    Args:
+        p_single: 单比特门错误率（当无法连接IBM服务或加载缓存时使用）
+        p_double: 双比特门错误率（当无法连接IBM服务或加载缓存时使用）
+        p_meas: 测量错误率（当无法连接IBM服务或加载缓存时使用）
+    """
+    import pickle
+    
+    noise_model_file = "ibm_fez_noise.pkl"
+    
+    # 1. 尝试从本地文件加载噪声模型
+    if os.path.exists(noise_model_file):
+        try:
+            print("正在从本地缓存加载IBM量子硬件噪声模型...")
+            with open(noise_model_file, "rb") as f:
+                noise_model = pickle.load(f)
+            print("✓ 成功加载本地缓存的噪声模型")
+            return noise_model
+        except Exception as e:
+            print(f"⚠ 加载本地噪声模型失败: {e}")
+            print("  - 将尝试从IBM量子硬件获取新的噪声模型")
+    
+    # 2. 尝试从IBM量子硬件获取噪声模型
+    try:
+        from qiskit_ibm_runtime import QiskitRuntimeService 
+        from qiskit_aer.noise import NoiseModel 
+        
+        print("正在从IBM量子硬件获取真实噪声模型...")
+        service = QiskitRuntimeService() 
+        backend = service.backend("ibm_fez") 
+        
+        noise_model = NoiseModel.from_backend(backend)
+        print("✓ 成功获取IBM量子硬件噪声模型")
+        print(f"  - 后端名称: {backend.name}")
+        print(f"  - 噪声模型包含的门: {noise_model.basis_gates}")
+        
+        # 保存噪声模型到本地文件
+        try:
+            with open(noise_model_file, "wb") as f:
+                pickle.dump(noise_model, f)
+            print(f"✓ 噪声模型已保存到本地文件: {noise_model_file}")
+        except Exception as e:
+            print(f"⚠ 保存噪声模型到本地文件失败: {e}")
+            print("  - 后续运行将需要重新从IBM量子硬件获取噪声模型")
+        
+        return noise_model
+    except Exception as e:
+        print(f"⚠ 无法从IBM量子硬件获取噪声模型: {e}")
+        print("  - 将使用默认噪声模型作为替代")
+        # 当无法连接IBM服务时，使用默认噪声模型
+        from qiskit_aer.noise import NoiseModel, pauli_error
+        
+        noise_model = NoiseModel()
+        
+        # 1. 量子比特翻转错误（单比特门错误）
+        error_single = pauli_error([('X', p_single), ('I', 1 - p_single)])
+        
+        # 2. 双比特门错误
+        error_double = pauli_error([('XX', p_double), ('II', 1 - p_double)])
+        
+        # 3. 添加噪声到门操作
+        noise_model.add_all_qubit_quantum_error(error_single, ['u1', 'u2', 'u3'])
+        noise_model.add_all_qubit_quantum_error(error_double, ['cx'])
+        
+        # 4. 添加测量错误
+        error_meas = pauli_error([('X', p_meas), ('I', 1 - p_meas)])
+        noise_model.add_all_qubit_quantum_error(error_meas, ['measure'])
+        
+        return noise_model
 
 
 def setup_paths() -> None:
@@ -68,8 +149,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend",type=str,choices=["local", "ibm_quantum", "aws_sv1", "aws_garnet"],default="local",help="量子后端类型 (默认: local)")
     parser.add_argument("--interaction_type",type=str,choices=["MJ", "HP"],default="MJ",help="相互作用模型: MJ (Miyazawa-Jernigan) 或 HP (疏水-极性) (默认: MJ)")
     parser.add_argument("--shots",type=int,default=100,help="硬件执行的测量次数 (默认: 100)")
+    parser.add_argument("--max_optimization_iterations",type=int,default=50,help="最大优化迭代次数 (默认: 50)")
     parser.add_argument("--output_dir",type=str,default=None,help="结果输出基础目录，实际结果将保存在该目录下的 {时间戳}_qthesis_{backend} 子目录中 (默认: <root>/results)")
     parser.add_argument("--encoding",type=str,choices=["DENSE", "SPARSE"],default="DENSE",help="构象编码类型 (默认: DENSE)")
+    parser.add_argument("--use_noise",action="store_true",help="使用噪声模型模拟真实量子硬件噪声")
+    parser.add_argument("--noise_single",type=float,default=0.01,help="单比特门错误率 (默认: 0.01)")
+    parser.add_argument("--noise_double",type=float,default=0.05,help="双比特门错误率 (默认: 0.05)")
+    parser.add_argument("--noise_meas",type=float,default=0.03,help="测量错误率 (默认: 0.03)")
     
     return parser.parse_args()
 
@@ -102,13 +188,28 @@ def apply_config(args: argparse.Namespace) -> None:
     constants.INTERACTION_TYPE = interaction_map[args.interaction_type]
     constants.IBM_QUANTUM_SHOTS = args.shots
     
+    # 设置噪声模型
+    if args.use_noise:
+        noise_model = create_noise_model(
+            p_single=args.noise_single,
+            p_double=args.noise_double,
+            p_meas=args.noise_meas
+        )
+        constants.NOISE_MODEL = noise_model
+        print(f"✓ 已启用噪声模型 (单比特: {args.noise_single}, 双比特: {args.noise_double}, 测量: {args.noise_meas})")
+    else:
+        constants.NOISE_MODEL = None
+    
     # 设置结果基础目录
     root_dir = Path(__file__).parent
     from datetime import datetime
     
     # 创建时间戳子目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    subdir_name = f"{timestamp}_qthesis_{args.backend}"
+    if args.use_noise:
+        subdir_name = f"{timestamp}_qthesis_{args.backend}_noise"
+    else:
+        subdir_name = f"{timestamp}_qthesis_{args.backend}"
     
     if args.output_dir:
         # 如果用户指定了output_dir，则在该目录下创建 {时间戳}_qthesis_{backend} 的子目录
@@ -178,7 +279,7 @@ def main() -> None:
         distance_map=distance_map,
     )
 
-    vqe, counts, values, circuit_info = setup_vqe_optimization(num_qubits=compressed_h.num_qubits, shots=args.shots)
+    vqe, counts, values, circuit_info = setup_vqe_optimization(num_qubits=compressed_h.num_qubits, shots=args.shots, max_iterations=args.max_optimization_iterations)
 
     print("\n" + "=" * 60)
     print("run_qthesis.py - Qubit 和 Shot 信息")
@@ -191,6 +292,12 @@ def main() -> None:
     print(f"  相互作用模型: {args.interaction_type}")
     print(f"  构象编码: {args.encoding}")
     print(f"  Shot 数量: {args.shots}")
+    print(f"  噪声模型: {'已启用' if args.use_noise else '已禁用'}")
+    if args.use_noise:
+        print(f"  - 噪声参数:")
+        print(f"    * 单比特门错误率: {args.noise_single}")
+        print(f"    * 双比特门错误率: {args.noise_double}")
+        print(f"    * 测量错误率: {args.noise_meas}")
     print()
     print("【Qubit 数量】")
     print(f"  原始哈密顿量 Qubits: {compressed_h.num_qubits}")

@@ -105,19 +105,21 @@ def build_and_compress_hamiltonian(
 def setup_vqe_optimization(
     num_qubits: int,
     shots: int = 100,
+    max_iterations: int = 50,
 ) -> tuple[SamplingVQE, list[int], list[float], dict[str, Any]]:
     """Setup the VQE optimization process.
 
     Args:
         num_qubits (int): Number of qubits for the ansatz.
         shots (int): Number of shots per iteration.
+        max_iterations (int): Maximum number of optimization iterations.
 
     Returns:
         tuple[SamplingVQE, list[int], list[float], dict[str, Any]]: The VQE instance, evaluation counts (iterations), 
         their respective energy values, and circuit information dictionary.
 
     """
-    optimizer = COBYLA(maxiter=50)
+    optimizer = COBYLA(maxiter=max_iterations)
 
     ansatz: QuantumCircuit = real_amplitudes(num_qubits=num_qubits, reps=1)
 

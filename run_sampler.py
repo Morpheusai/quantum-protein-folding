@@ -8,6 +8,12 @@
 2. 使用CVaR (Conditional Value at Risk) 优化策略
 3. 基于采样的能量计算方法
 4. 支持多轮独立实验及结果汇总分析
+5. 支持IBM量子硬件噪声模型模拟
+
+噪声模型：
+1. 支持从IBM量子硬件获取真实噪声模型（带本地缓存）
+2. 支持自定义噪声参数（单比特门、双比特门、测量错误率）
+3. 仅本地模拟器（local, local_aer）支持噪声模型
 """
 
 # =============================================================================
@@ -91,6 +97,10 @@ parser.add_argument('--min_shots', type=int, default=100, help='自适应Shots�
 parser.add_argument('--max_shots', type=int, default=2000, help='自适应Shots的最大采样数 (默认为2000)')
 parser.add_argument('--unique_structures', action='store_true', help='开启结构去重：仅返回折叠结构不同的最优结果')
 parser.add_argument('--restarts', type=int, default=1, help='独立实验运行次数 (Multi-Restart)，用于避免局部最优，默认为1')
+parser.add_argument('--use_noise', action='store_true', help='使用噪声模型模拟真实量子硬件噪声')
+parser.add_argument('--noise_single', type=float, default=0.01, help='单比特门错误率 (默认: 0.01)')
+parser.add_argument('--noise_double', type=float, default=0.05, help='双比特门错误率 (默认: 0.05)')
+parser.add_argument('--noise_meas', type=float, default=0.03, help='测量错误率 (默认: 0.03)')
 parser.add_argument('--resume', type=str, default=None, help='断点续传：指定结果目录以恢复历史任务')
 parser.add_argument('--initial_params', type=str, default=None, help='Warm-Start：从 JSON 文件加载初始参数向量')
 
@@ -133,6 +143,12 @@ def main():
         print(f"  - 自适应Shots: ON (Min: {args.min_shots}, Max: {args.max_shots})")
     else:
         print(f"  - 自适应Shots: OFF")
+    print(f"  - 噪声模型: {'已启用' if args.use_noise else '已禁用'}")
+    if args.use_noise:
+        print(f"  - 噪声参数:")
+        print(f"    * 单比特门错误率: {args.noise_single}")
+        print(f"    * 双比特门错误率: {args.noise_double}")
+        print(f"    * 测量错误率: {args.noise_meas}")
 
     # 加载 Warm-Start 初始参数 (如果指定)
     if args.initial_params:
@@ -166,7 +182,17 @@ def main():
     # 3.3 配置量子后端
     # =============================================================================
     print(f"\n正在配置量子后端...")
-    backend_info = QuantumBackendManager.setup_backend(args.backend, args.aws_region, args.shots, use_estimator=False, resilience_level=args.resilience_level)
+    backend_info = QuantumBackendManager.setup_backend(
+        args.backend, 
+        args.aws_region, 
+        args.shots, 
+        use_estimator=False, 
+        resilience_level=args.resilience_level,
+        use_noise=args.use_noise,
+        noise_single=args.noise_single,
+        noise_double=args.noise_double,
+        noise_meas=args.noise_meas
+    )
     backend = backend_info['backend']
     print(f"✓ 量子后端已就绪 | 量子比特数: {num_qubits}")
 

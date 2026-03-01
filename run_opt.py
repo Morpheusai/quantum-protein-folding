@@ -8,11 +8,17 @@
 2. 解决了量子后端测量门冲突问题
 3. 使用VQE算法优化蛋白质折叠能量
 4. 支持多轮独立实验及结果汇总分析
+5. 支持IBM量子硬件噪声模型模拟
 
 兼容性修复：
 1. 解决 AWS 后端 "Cannot measure previously measured qubit" 报错
 2. 强制在每次迭代中使用干净的 Ansatz 副本
 3. 改用Estimator替代Sampler，提高各后端兼容性
+
+噪声模型：
+1. 支持从IBM量子硬件获取真实噪声模型（带本地缓存）
+2. 支持自定义噪声参数（单比特门、双比特门、测量错误率）
+3. 仅本地模拟器（local, local_aer）支持噪声模型
 """
 
 import argparse
@@ -45,6 +51,82 @@ import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
 
 # ====================
+# 噪声模型创建
+# ====================
+
+def create_noise_model(p_single=0.01, p_double=0.05, p_meas=0.03):
+    """从IBM量子硬件获取真实噪声模型（带缓存）
+    
+    Args:
+        p_single: 单比特门错误率（当无法连接IBM服务或加载缓存时使用）
+        p_double: 双比特门错误率（当无法连接IBM服务或加载缓存时使用）
+        p_meas: 测量错误率（当无法连接IBM服务或加载缓存时使用）
+    """
+    noise_model_file = "ibm_fez_noise.pkl"
+    
+    # 1. 尝试从本地文件加载噪声模型
+    if os.path.exists(noise_model_file):
+        try:
+            import pickle
+            print("正在从本地缓存加载IBM量子硬件噪声模型...")
+            with open(noise_model_file, "rb") as f:
+                noise_model = pickle.load(f)
+            print("✓ 成功加载本地缓存的噪声模型")
+            return noise_model
+        except Exception as e:
+            print(f"⚠ 加载本地噪声模型失败: {e}")
+            print("  - 将尝试从IBM量子硬件获取新的噪声模型")
+    
+    # 2. 尝试从IBM量子硬件获取噪声模型
+    try:
+        from qiskit_ibm_runtime import QiskitRuntimeService 
+        from qiskit_aer.noise import NoiseModel 
+        import pickle
+        
+        print("正在从IBM量子硬件获取真实噪声模型...")
+        service = QiskitRuntimeService() 
+        backend = service.backend("ibm_fez") 
+        
+        noise_model = NoiseModel.from_backend(backend)
+        print("✓ 成功获取IBM量子硬件噪声模型")
+        print(f"  - 后端名称: {backend.name}")
+        print(f"  - 噪声模型包含的门: {noise_model.basis_gates}")
+        
+        # 保存噪声模型到本地文件
+        try:
+            with open(noise_model_file, "wb") as f:
+                pickle.dump(noise_model, f)
+            print(f"✓ 噪声模型已保存到本地文件: {noise_model_file}")
+        except Exception as e:
+            print(f"⚠ 保存噪声模型到本地文件失败: {e}")
+            print("  - 后续运行将需要重新从IBM量子硬件获取噪声模型")
+        
+        return noise_model
+    except Exception as e:
+        print(f"⚠ 无法从IBM量子硬件获取噪声模型: {e}")
+        print("  - 将使用默认噪声模型作为替代")
+        # 当无法连接IBM服务时，使用默认噪声模型
+        from qiskit_aer.noise import NoiseModel, pauli_error, thermal_relaxation_error
+        
+        noise_model = NoiseModel()
+        
+        # 1. 量子比特翻转错误（单比特门错误）
+        error_single = pauli_error([('X', p_single), ('I', 1 - p_single)])
+        
+        # 2. 双比特门错误
+        error_double = pauli_error([('XX', p_double), ('II', 1 - p_double)])
+        
+        # 3. 添加噪声到门操作
+        noise_model.add_all_qubit_quantum_error(error_single, ['u1', 'u2', 'u3'])
+        noise_model.add_all_qubit_quantum_error(error_double, ['cx'])
+        
+        # 4. 添加测量错误
+        error_meas = pauli_error([('X', p_meas), ('I', 1 - p_meas)])
+        noise_model.add_all_qubit_quantum_error(error_meas, ['measure'])
+        
+        return noise_model
+
+# ====================
 # 参数配置
 # ====================
 parser = argparse.ArgumentParser()
@@ -64,6 +146,10 @@ parser.add_argument('--adaptive_shots', action='store_true', help='启用自适�
 parser.add_argument('--min_shots', type=int, default=100)
 parser.add_argument('--max_shots', type=int, default=1000)
 parser.add_argument('--aws_region', default=None)
+parser.add_argument('--use_noise', action='store_true', help='使用噪声模型模拟真实量子硬件噪声')
+parser.add_argument('--noise_single', type=float, default=0.01, help='单比特门错误率 (默认: 0.01)')
+parser.add_argument('--noise_double', type=float, default=0.05, help='双比特门错误率 (默认: 0.05)')
+parser.add_argument('--noise_meas', type=float, default=0.03, help='测量错误率 (默认: 0.03)')
 parser.add_argument('--dry_run', action='store_true', help='干跑模式：仅在真实提交前进行本地预检')
 parser.add_argument('--resume', type=str, default=None, help='断点续传：指定结果目录以恢复历史任务')
 parser.add_argument('--initial_params', type=str, default=None, help='Warm-Start：从 JSON 文件加载初始参数向量')
@@ -71,6 +157,8 @@ args = parser.parse_args()
 
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 RESULT_DIR = os.path.join("results", f"{TIMESTAMP}_{args.backend}_estimator")
+if args.use_noise:
+    RESULT_DIR = RESULT_DIR + "_noise"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 
@@ -190,8 +278,18 @@ class StructuralLoggingEstimator:
 # 量子后端配置与运行逻辑
 # ====================
 
-def setup_v2_backend(backend_name, aws_region=None, shots=1000):
-    """适配 Qiskit 2.x V2 Primitives，使用Estimator而非Sampler以提高各后端兼容性"""
+def setup_v2_backend(backend_name, aws_region=None, shots=1000, use_noise=False, noise_single=0.01, noise_double=0.05, noise_meas=0.03):
+    """适配 Qiskit 2.x V2 Primitives，使用Estimator而非Sampler以提高各后端兼容性
+    
+    Args:
+        backend_name: 后端名称
+        aws_region: AWS区域（仅AWS后端需要）
+        shots: 采样次数
+        use_noise: 是否使用噪声模型（仅本地模拟器支持）
+        noise_single: 单比特门错误率
+        noise_double: 双比特门错误率
+        noise_meas: 测量错误率
+    """
     info = {'backend': None, 'estimator': None}
     try:
         if backend_name.lower() == 'aws_sv1':
@@ -286,7 +384,15 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
             try:
                 from qiskit_aer import AerSimulator
                 from qiskit.primitives import BackendEstimatorV2
-                backend = AerSimulator()
+                
+                # 配置模拟器，启用噪声模型（如果需要）
+                simulator_options = {}
+                if use_noise:
+                    noise_model = create_noise_model(p_single=noise_single, p_double=noise_double, p_meas=noise_meas)
+                    simulator_options['noise_model'] = noise_model
+                    print(f"✓ 已启用噪声模型 (单比特: {noise_single}, 双比特: {noise_double}, 测量: {noise_meas})")
+                
+                backend = AerSimulator(**simulator_options)
                 estimator = BackendEstimatorV2(backend=backend)
                 estimator.options.default_precision = 1 / (shots**0.5)
                 estimator.options.default_shots = shots
@@ -303,7 +409,15 @@ def setup_v2_backend(backend_name, aws_region=None, shots=1000):
             try:
                 from qiskit_aer import AerSimulator
                 from qiskit.primitives import BackendEstimatorV2
-                backend = AerSimulator()
+                
+                # 配置模拟器，启用噪声模型（如果需要）
+                simulator_options = {}
+                if use_noise:
+                    noise_model = create_noise_model(p_single=noise_single, p_double=noise_double, p_meas=noise_meas)
+                    simulator_options['noise_model'] = noise_model
+                    print(f"✓ 已启用噪声模型 (单比特: {noise_single}, 双比特: {noise_double}, 测量: {noise_meas})")
+                
+                backend = AerSimulator(**simulator_options)
                 estimator = BackendEstimatorV2(backend=backend)
                 estimator.options.default_precision = 1 / (shots**0.5)
                 estimator.options.default_shots = shots
@@ -542,6 +656,12 @@ def main():
     print(f"  - 局部重叠惩罚: {args.penalty_local_overlap}")
     print(f"  - 量子采样次数: {args.shots}")
     print(f"  - 最大结果数量: {args.max_results}")
+    print(f"  - 噪声模型: {'已启用' if args.use_noise else '已禁用'}")
+    if args.use_noise:
+        print(f"  - 噪声参数:")
+        print(f"    * 单比特门错误率: {args.noise_single}")
+        print(f"    * 双比特门错误率: {args.noise_double}")
+        print(f"    * 测量错误率: {args.noise_meas}")
     print(f"  - 结果目录: {RESULT_DIR}")
 
     try:
@@ -617,7 +737,15 @@ def main():
     
     # 初始化后端与算法组件
     print(f"\n正在使用VQE算法求解...")
-    backend_info = setup_v2_backend(args.backend, args.aws_region, args.shots)
+    backend_info = setup_v2_backend(
+        args.backend, 
+        args.aws_region, 
+        args.shots,
+        args.use_noise,
+        noise_single=args.noise_single,
+        noise_double=args.noise_double,
+        noise_meas=args.noise_meas
+    )
     optimizer = COBYLA(maxiter=args.max_optimization_iterations)
     print("✓ 优化器设置完成")
     print(f"  - 使用优化器: {type(optimizer).__name__}")

@@ -8,17 +8,21 @@
 - CVaR-VQE 多起点优化
 - 蛋白质3D结构可视化
 - PDB文件生成
+- 支持本地模拟器噪声模型
 """
 
 import os
 import sys
 import csv
+import json
 import argparse
 from pathlib import Path
 from datetime import datetime
+from typing import Dict, Any
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from qiskit import QuantumCircuit
 
 # 添加 QuPepFold 模块到 Python 路径
 qupepfold_path = Path(__file__).parent / "QuPepFold" / "QuPepFold"
@@ -40,6 +44,134 @@ from qupepfold.qupepfold import (
     plot_energy_breakdown_for_most_negative,  # 绘制能量分解图
 )
 from lib.job_metadata_logger import JobMetadataLogger
+
+
+def sampler_fold_probs(qc: QuantumCircuit, hyper: Dict, shots: int = 1024, noise_model=None) -> Dict[str, float]:
+    """使用采样方法计算概率分布（支持噪声模型）
+    
+    Args:
+        qc: 量子电路
+        hyper: 超参数字典
+        shots: 采样次数
+        noise_model: 噪声模型（可选）
+    
+    Returns:
+        概率分布字典
+    """
+    from qiskit_aer import AerSimulator
+    from qiskit import transpile
+    from qiskit.primitives import SamplerResult
+    import numpy as np
+    
+    # 获取测量的量子比特索引
+    num_cfg = int(hyper["numQubitsConfig"])
+    num_int = int(hyper["numQubitsInteraction"])
+    measured_idx = list(range(num_cfg + num_int))
+    
+    # 创建带测量的电路副本
+    qc_measured = qc.copy()
+    qc_measured.measure_all()
+    
+    # 创建模拟器
+    if noise_model is not None:
+        simulator = AerSimulator(noise_model=noise_model)
+    else:
+        simulator = AerSimulator()
+    
+    # 转译电路
+    transpiled_qc = transpile(qc_measured, simulator, optimization_level=3)
+    
+    # 运行采样
+    job = simulator.run(transpiled_qc, shots=shots)
+    result = job.result()
+    counts = result.get_counts()
+    
+    # 转换为概率分布（只保留测量的量子比特）
+    out: Dict[str, float] = {}
+    total_shots = sum(counts.values())
+    
+    for bitstring, count in counts.items():
+        # bitstring 是大端序（最高位在最左边），需要提取测量的量子比特
+        # Qiskit 的 bitstring 格式: q_{n-1}...q_0
+        Q = qc.num_qubits
+        # 提取测量比特（按照 measured_idx 的顺序）
+        fold = ''.join(bitstring[Q - 1 - idx] for idx in measured_idx)
+        out[fold] = out.get(fold, 0.0) + count / total_shots
+    
+    return out
+
+
+def create_noise_model(p_single=0.01, p_double=0.05, p_meas=0.03):
+    """从IBM量子硬件获取真实噪声模型（带缓存）
+    
+    Args:
+        p_single: 单比特门错误率（当无法连接IBM服务或加载缓存时使用）
+        p_double: 双比特门错误率（当无法连接IBM服务或加载缓存时使用）
+        p_meas: 测量错误率（当无法连接IBM服务或加载缓存时使用）
+    """
+    import pickle
+    
+    noise_model_file = "ibm_fez_noise.pkl"
+    
+    # 1. 尝试从本地文件加载噪声模型
+    if os.path.exists(noise_model_file):
+        try:
+            print("正在从本地缓存加载IBM量子硬件噪声模型...")
+            with open(noise_model_file, "rb") as f:
+                noise_model = pickle.load(f)
+            print("✓ 成功加载本地缓存的噪声模型")
+            return noise_model
+        except Exception as e:
+            print(f"⚠ 加载本地噪声模型失败: {e}")
+            print("  - 将尝试从IBM量子硬件获取新的噪声模型")
+    
+    # 2. 尝试从IBM量子硬件获取噪声模型
+    try:
+        from qiskit_ibm_runtime import QiskitRuntimeService 
+        from qiskit_aer.noise import NoiseModel 
+        
+        print("正在从IBM量子硬件获取真实噪声模型...")
+        service = QiskitRuntimeService() 
+        backend = service.backend("ibm_fez") 
+        
+        noise_model = NoiseModel.from_backend(backend)
+        print("✓ 成功获取IBM量子硬件噪声模型")
+        print(f"  - 后端名称: {backend.name}")
+        print(f"  - 噪声模型包含的门: {noise_model.basis_gates}")
+        
+        # 保存噪声模型到本地文件
+        try:
+            with open(noise_model_file, "wb") as f:
+                pickle.dump(noise_model, f)
+            print(f"✓ 噪声模型已保存到本地文件: {noise_model_file}")
+        except Exception as e:
+            print(f"⚠ 保存噪声模型到本地文件失败: {e}")
+            print("  - 后续运行将需要重新从IBM量子硬件获取噪声模型")
+        
+        return noise_model
+    except Exception as e:
+        print(f"⚠ 无法从IBM量子硬件获取噪声模型: {e}")
+        print("  - 将使用默认噪声模型作为替代")
+        # 当无法连接IBM服务时，使用默认噪声模型
+        from qiskit_aer.noise import NoiseModel, pauli_error
+        
+        noise_model = NoiseModel()
+        
+        # 1. 量子比特翻转错误（单比特门错误）
+        error_single = pauli_error([('X', p_single), ('I', 1 - p_single)])
+        
+        # 2. 双比特门错误
+        error_double = pauli_error([('XX', p_double), ('II', 1 - p_double)])
+        
+        # 3. 添加噪声到门操作
+        noise_model.add_all_qubit_quantum_error(error_single, ['u1', 'u2', 'u3'])
+        noise_model.add_all_qubit_quantum_error(error_double, ['cx'])
+        
+        # 4. 添加测量错误
+        error_meas = pauli_error([('X', p_meas), ('I', 1 - p_meas)])
+        noise_model.add_all_qubit_quantum_error(error_meas, ['measure'])
+        
+        return noise_model
 
 
 def plot_protein_3d(atoms, seq, title, output_path):
@@ -227,11 +359,16 @@ def main():
     # 蛋白质序列参数 (2-10个氨基酸)
     parser.add_argument("--seq", type=str, default='APRLRFY',help="蛋白质序列 (2-10个氨基酸, 例如: APRLRFY)")
     # CVaR-VQE 优化参数
-    parser.add_argument("--tries", type=int, default=10,help="CVaR多起点优化尝试次数 (默认: 10)")
+    parser.add_argument("--max_optimization_iterations", type=int, default=10,help="最大优化迭代次数 (默认: 10)")
     parser.add_argument("--alpha", type=float, default=0.025,help="CVaR尾部质量参数 (0<alpha<1, 默认: 0.025)")
     # 量子计算参数
     parser.add_argument("--shots", type=int, default=1024,help="(信息性) 量子测量次数 (默认: 1024)")
     parser.add_argument("--backend", default="local",choices=["local", "aws_sv1", "aws_garnet", "aws_forte"],help="量子计算后端 (默认: local)")
+    # 噪声模型参数
+    parser.add_argument("--use_noise", action="store_true", help="使用噪声模型模拟真实量子硬件噪声")
+    parser.add_argument("--noise_single", type=float, default=0.01, help="单比特门错误率 (默认: 0.01)")
+    parser.add_argument("--noise_double", type=float, default=0.05, help="双比特门错误率 (默认: 0.05)")
+    parser.add_argument("--noise_meas", type=float, default=0.03, help="测量错误率 (默认: 0.03)")
     # 解析命令行参数
     args = parser.parse_args()
 
@@ -243,7 +380,10 @@ def main():
     # 创建带时间戳和后端名称的输出目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backend_name = args.backend
-    output_dir = Path("./results") / f"{timestamp}_{backend_name}_qupepfold"
+    if args.use_noise:
+        output_dir = Path("./results") / f"{timestamp}_qupepfold_{backend_name}_noise"
+    else:
+        output_dir = Path("./results") / f"{timestamp}_qupepfold_{backend_name}"
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"输出目录: {output_dir}")
@@ -264,8 +404,14 @@ def main():
     print(f"  蛋白质序列: {seq}")
     print(f"  量子后端: {args.backend}")
     print(f"  CVaR alpha: {args.alpha}")
-    print(f"  尝试次数: {args.tries}")
+    print(f"  最大优化迭代次数: {args.max_optimization_iterations}")
     print(f"  Shot 数量: {args.shots}")
+    print(f"  噪声模型: {'已启用' if args.use_noise else '已禁用'}")
+    if args.use_noise:
+        print(f"  - 噪声参数:")
+        print(f"    * 单比特门错误率: {args.noise_single}")
+        print(f"    * 双比特门错误率: {args.noise_double}")
+        print(f"    * 测量错误率: {args.noise_meas}")
     print()
     print("【Qubit 数量】")
     print(f"  配置量子比特: {num_q_cfg}")
@@ -296,9 +442,21 @@ def main():
         "numShots": int(args.shots),              # 量子测量次数
     }
 
+    # 如果启用噪声模型，添加到超参数字典
+    if args.use_noise:
+        noise_model = create_noise_model(
+            p_single=args.noise_single,
+            p_double=args.noise_double,
+            p_meas=args.noise_meas
+        )
+        hyper["noise_model"] = noise_model
+        print(f"[噪声模型] 已启用噪声模型")
+    else:
+        hyper["noise_model"] = None
+
     # CVaR-VQE 多起点优化
-    print(f"\n[CVaR-VQE] alpha={args.alpha}, 尝试次数={args.tries}")
-    best_x, best_cvar, trace, tries_info = optimize_cvar_multistart(hyper, args.tries, args.alpha)
+    print(f"\n[CVaR-VQE] alpha={args.alpha}, 最大优化迭代次数={args.max_optimization_iterations}")
+    best_x, best_cvar, trace, tries_info = optimize_cvar_multistart(hyper, args.max_optimization_iterations, args.alpha)
     print(f"[CVaR-VQE] 最优CVaR能量: {best_cvar:.6f}")
     
     # 收集每次迭代的电路信息
@@ -396,9 +554,17 @@ def main():
     except Exception:
         pass
 
-    # 在最优解处计算概率分布 (使用状态向量)
+    # 在最优解处计算概率分布
     qc = build_scalable_ansatz(best_x, hyper, measure=False)  # 构建可扩展量子电路
-    probs = statevector_fold_probs(qc, hyper)                 # 计算状态向量折叠概率
+    
+    # 根据是否启用噪声选择计算方法
+    if args.use_noise:
+        print(f"[噪声模型] 使用采样方法计算概率分布 (shots={args.shots})")
+        probs = sampler_fold_probs(qc, hyper, shots=args.shots, noise_model=hyper.get("noise_model"))
+    else:
+        probs = statevector_fold_probs(qc, hyper)
+        print(f"[理想模拟] 使用状态向量计算精确概率分布")
+    
     states = list(probs.keys())                               # 获取所有可能的状态
     energies = exact_hamiltonian(states, hyper)               # 计算每个状态的精确能量
 
@@ -470,8 +636,8 @@ def main():
         json.dump({
             "backend": args.backend,
             "shots_requested": int(args.shots),
-            "shots_actual_total": int(args.shots) * int(args.tries),
-            "iteration_count": int(args.tries),
+            "shots_actual_total": int(args.shots) * int(args.max_optimization_iterations),
+            "iteration_count": int(args.max_optimization_iterations),
             "outcome_summary": f"cvar_min={float(best_cvar):.6f}",
             "qubits_used": int(num_q_cfg + num_q_int + 1),
             "qubits_full": int(num_q_cfg + num_q_int + 1),

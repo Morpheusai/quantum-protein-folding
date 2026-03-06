@@ -25,8 +25,18 @@ import json
 import csv
 import numpy as np
 import copy
+import time
 # 环境配置
 current_dir = os.path.dirname(os.path.abspath(__file__))
+# 强制使用 UTF-8 编码输出，适配 Windows 终端
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        # 兼容旧版本 Python
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
 if os.name == 'nt':
     os.environ['PYTHONUTF8'] = '1'
     os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -51,7 +61,166 @@ from lib.quantum_optimizer import JobRecorder
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
+
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 warnings.filterwarnings('ignore')
+
+# ====================
+# 时间追踪类
+# ====================
+
+
+class QuantumTimeTracker:
+    """量子计算时间追踪器 - 区分量子/经典计算时间"""
+
+    def __init__(self):
+        self.submit_time = None
+        self.result_received = None
+        self.iteration_start = None
+        self.iteration_end = None
+        self.quantum_time = 0.0
+        self.queue_time = 0.0
+        self.classical_time = 0.0
+        self.total_time = 0.0
+        self._backend_name = None
+
+    def extract_from_job(self, job, backend_name):
+        """从 job 对象提取时间信息"""
+        self._backend_name = backend_name
+        try:
+            backend_lower = backend_name.lower()
+            if backend_lower.startswith("ibm"):
+                self._extract_ibm_time(job)
+            elif backend_lower.startswith("aws"):
+                self._extract_aws_time(job)
+            else:
+                self._extract_local_time()
+        except Exception as e:
+            print(f"    ⚠ 提取时间信息失败: {e}")
+            self._extract_local_time()
+
+    def _extract_ibm_time(self, job):
+        """从 IBM Quantum job 提取时间"""
+        try:
+            if hasattr(job, "metrics"):
+                metrics = job.metrics()
+                self.quantum_time = float(
+                    metrics.get("usage", {}).get("quantum_seconds", 0.0)
+                )
+                classical_from_ibm = float(
+                    metrics.get("usage", {}).get("classical_seconds", 0.0)
+                )
+                timestamps = metrics.get("timestamps", {})
+                if timestamps:
+                    from datetime import datetime
+
+                    created = timestamps.get("created")
+                    running = timestamps.get("running")
+                    if created and running:
+                        t_created = datetime.fromisoformat(
+                            created.replace("Z", "+00:00")
+                        )
+                        t_running = datetime.fromisoformat(
+                            running.replace("Z", "+00:00")
+                        )
+                        self.queue_time = (t_running - t_created).total_seconds()
+                if (
+                    self.quantum_time == 0.0
+                    and self.submit_time
+                    and self.result_received
+                ):
+                    self.quantum_time = self.result_received - self.submit_time
+            else:
+                self._extract_local_time()
+        except Exception:
+            self._extract_local_time()
+
+    def _extract_aws_time(self, job):
+        """从 AWS Braket job 提取时间"""
+        try:
+            metadata = None
+            if hasattr(job, "metadata"):
+                metadata = job.metadata()
+            elif hasattr(job, "_job") and hasattr(job._job, "metadata"):
+                metadata = job._job.metadata()
+            if metadata:
+                from datetime import datetime
+
+                created = metadata.get("createdAt")
+                started = metadata.get("startedAt")
+                ended = metadata.get("endedAt")
+                if created:
+                    t_created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                if started:
+                    t_started = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                else:
+                    t_started = t_created
+                if ended:
+                    t_ended = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+                else:
+                    t_ended = t_started
+                if started and ended:
+                    self.quantum_time = (t_ended - t_started).total_seconds()
+                if created and started:
+                    self.queue_time = (t_started - t_created).total_seconds()
+            else:
+                self._extract_local_time()
+        except Exception:
+            self._extract_local_time()
+
+    def _extract_local_time(self):
+        """本地模拟器：使用实际测量时间"""
+        if self.submit_time and self.result_received:
+            self.quantum_time = self.result_received - self.submit_time
+        self.queue_time = 0.0
+
+    def finalize(self):
+        """计算最终时间"""
+        if self.iteration_start and self.iteration_end:
+            self.total_time = self.iteration_end - self.iteration_start
+        if self.total_time > 0:
+            self.classical_time = max(
+                0.0, self.total_time - self.quantum_time - self.queue_time
+            )
+
+    def to_dict(self):
+        """输出时间字典"""
+        self.finalize()
+        return {
+            "quantum_time": round(self.quantum_time, 3),
+            "queue_time": round(self.queue_time, 3),
+            "classical_time": round(self.classical_time, 3),
+            "total_time": round(self.total_time, 3),
+        }
+
+
+def generate_timing_summary(all_timings, backend_name):
+    """生成时间汇总报告"""
+    if not all_timings:
+        return None
+    total_quantum = sum(t.get("quantum_time", 0) for t in all_timings)
+    total_queue = sum(t.get("queue_time", 0) for t in all_timings)
+    total_classical = sum(t.get("classical_time", 0) for t in all_timings)
+    total_time = sum(t.get("total_time", 0) for t in all_timings)
+    num_iters = len(all_timings)
+    return {
+        "backend": backend_name,
+        "total_quantum_time": round(total_quantum, 3),
+        "total_queue_time": round(total_queue, 3),
+        "total_classical_time": round(total_classical, 3),
+        "total_time": round(total_time, 3),
+        "num_iterations": num_iters,
+        "average_per_iteration": {
+            "quantum_time": round(total_quantum / max(1, num_iters), 3),
+            "queue_time": round(total_queue / max(1, num_iters), 3),
+            "classical_time": round(total_classical / max(1, num_iters), 3),
+            "total_time": round(total_time / max(1, num_iters), 3),
+        },
+        "per_iteration": all_timings,
+    }
+
 
 # ====================
 # 噪声模型创建
@@ -302,120 +471,139 @@ def setup_sampler_backend(backend_name, aws_region=None, shots=1000, use_noise=F
         return backend_info
 
 # ====================
-# 能量计算逻辑
+# 能量计算逻辑 (优化版)
 # ====================
 
-def estimate_energy_from_bitstring(bitstring, qubit_op):
+def preprocess_qubit_op(qubit_op):
     """
-    计算单个采样比特串对应的哈密顿量能量值
+    预处理哈密顿量，提取 Z 算子的比特索引，加速后续能量计算。
     
-    Args:
-        bitstring (str): 量子测量得到的比特串，如 '010110'
-        qubit_op: 量子比特哈密顿量算子
-        
     Returns:
-        float: 对应的能量值
+        list: [(coeff, [z_indices])] 列表
+    """
+    processed_terms = []
+    for pauli_str, coeff in qubit_op.to_list():
+        if coeff.real == 0:
+            continue
+        z_indices = []
+        # 处理反转逻辑，因为 Qiskit 比特顺序是反向的
+        for i, char in enumerate(reversed(pauli_str)):
+            if char == 'Z':
+                z_indices.append(i)
+            elif char == 'X' or char == 'Y':
+                # 基态期望值为 0，标记为无效项
+                z_indices = None
+                break
+        if z_indices is not None:
+            processed_terms.append((coeff.real, z_indices))
+    return processed_terms
+
+def estimate_energy_fast(bitstring, processed_terms):
+    """
+    使用预处理后的项快速计算单个比特串的能量。
     """
     energy = 0.0
-    # 将比特串反转，使其与哈密顿量的索引顺序对应
-    bit_list = [int(b) for b in reversed(bitstring)]
+    bit_list = [int(b) for b in reversed(bitstring)] # 虽然还是用了 reversed，但比多次循环字符串快
     
-    # 遍历哈密顿量的每一项 (Pauli算子及其系数)
-    for pauli_str, coeff in qubit_op.to_list():
+    for coeff, z_indices in processed_terms:
         val = 1.0
-        # 对于每个Pauli项，计算其在当前比特态下的期望值
-        for i, char in enumerate(reversed(pauli_str)):
-            if char == 'Z' and bit_list[i] == 1:
-                # Z算子在|1>态下贡献-1，在|0>态下贡献+1
+        for idx in z_indices:
+            if bit_list[idx] == 1:
                 val *= -1.0
-            elif char == 'X' or char == 'Y':
-                # X,Y算符在计算基态下的期望值为0，这是正确的处理
-                # 因为计算基态是Z算符的本征态，X/Y算符的期望值确实为0
-                val = 0.0 
-                break
-        energy += coeff.real * val
+        energy += coeff * val
     return energy
 
-def calculate_cvar_energy(counts, qubit_op, alpha):
+def calculate_cvar_energy_efficient(counts, qubit_op, alpha, processed_terms=None):
     """
-    实现CVaR (Conditional Value at Risk) 优化策略
-    CVaR是一种风险度量方法，只考虑能量最低的一部分样本
-    
-    Args:
-        counts (dict): 量子测量结果，键为比特串，值为出现次数
-        qubit_op: 量子比特哈密顿量算子
-        alpha (float): CVaR参数，取值[0,1]，表示使用最低能量样本的比例
+    高效的 CVaR 计算，不使用列表展开，直接使用频率统计。
+    """
+    if processed_terms is None:
+        processed_terms = preprocess_qubit_op(qubit_op)
         
-    Returns:
-        float: CVaR能量值（最低alpha比例样本的平均能量）
-    """
-    energies = []
-    
-    # 计算每个比特串的能量，并根据出现次数复制
+    # 计算每个唯一比特串的能量
+    bitstring_energies = []
     for bitstring, count in counts.items():
-        e = estimate_energy_from_bitstring(bitstring, qubit_op)
-        # 根据出现次数复制能量值，保持正确的权重
-        energies.extend([e] * count)
+        e = estimate_energy_fast(bitstring, processed_terms)
+        bitstring_energies.append((e, count))
     
-    # 按能量值升序排列
-    energies.sort()
+    # 按能量升序排列
+    bitstring_energies.sort(key=lambda x: x[0])
     
-    # 计算需要保留的样本数量（基于总shots数）
     total_shots = sum(counts.values())
     num_keep = max(1, int(total_shots * alpha))
     
-    # 返回最低能量样本的平均值
-    return np.mean(energies[:num_keep])
-
-def extract_top_results(counts, qubit_op, top_n):
-    """
-    从量子测量结果中提取能量最低的top_n个结果
+    # 累加前 alpha 比例的能量
+    cvar_sum = 0.0
+    processed_shots = 0
     
-    Args:
-        counts (dict): 量子测量结果，键为比特串，值为出现次数
-        qubit_op: 量子比特哈密顿量算子
-        top_n (int): 需要提取的最优结果数量
+    for energy, count in bitstring_energies:
+        remaining_needed = num_keep - processed_shots
+        if remaining_needed <= 0:
+            break
         
-    Returns:
-        list: 包含top_n个最优结果的列表，每个元素为(bitstring, energy, count)元组
+        shots_to_take = min(count, remaining_needed)
+        cvar_sum += energy * shots_to_take
+        processed_shots += shots_to_take
+    
+    return cvar_sum / num_keep
+
+def extract_top_results(counts, qubit_op, top_n, processed_terms=None):
     """
-    # 计算每个比特串的能量
+    从量子测量结果中提取能量最低的 top_n 个结果。
+    """
+    if processed_terms is None:
+        processed_terms = preprocess_qubit_op(qubit_op)
+        
     bitstring_energies = []
     for bitstring, count in counts.items():
-        energy = estimate_energy_from_bitstring(bitstring, qubit_op)
+        energy = estimate_energy_fast(bitstring, processed_terms)
         bitstring_energies.append((bitstring, energy, count))
     
-    # 按能量值升序排列
     bitstring_energies.sort(key=lambda x: x[1])
-    
-    # 提取能量最低的top_n个结果
-    top_results = bitstring_energies[:top_n]
-    
-    return top_results
+    return bitstring_energies[:top_n]
 
 # ====================
 # 主计算流程
 # ====================
 @metadata_logger
 def main():
-    print(f"🚀 启动蛋白质折叠计算任务 (采样器模式) | 序列: {args.main_chain}")
-    print(f"  - 噪声模型: {'已启用' if args.use_noise else '已禁用'}")
+    print(f"🚀 正在启动蛋白质折叠计算任务 (采样器模式)...")
+    print(f"🔗 启动服务器计算任务 | 蛋白质序列: {args.main_chain}")
+    
+    # 显示参数配置
+    print(f"\n[配置] 运行参数概览:")
+    print(f"  - 量子后端: {args.backend}")
+    print(f"  - 优化器: {args.optimizer}")
+    print(f"  - 最大优化迭代次数: {args.max_optimization_iterations}")
+    print(f"  - Ansatz 重复层数: {args.ansatz_reps}")
+    print(f"  - CVaR Alpha 参数: {args.alpha}")
+    print(f"  - 量子采样次数 (Shots): {args.shots}")
+    print(f"  - 实验轮数 (Restarts): {args.restarts}")
+    print(f"  - 结果保存目录: {RESULT_DIR}")
+    
+    # 噪声模型信息
+    print(f"  - 噪声模拟: {'✅ 已启用' if args.use_noise else '❌ 已禁用'}")
     if args.use_noise:
-        print(f"  - 噪声参数:")
-        print(f"    * 单比特门错误率: {args.noise_single}")
-        print(f"    * 双比特门错误率: {args.noise_double}")
-        print(f"    * 测量错误率: {args.noise_meas}")
-    print(f"  - 结果目录: {RESULT_DIR}")
+        print(f"    * 1-Qubit Error: {args.noise_single}")
+        print(f"    * 2-Qubit Error: {args.noise_double}")
+        print(f"    * Readout Error: {args.noise_meas}")
     
     # 导入蛋白质折叠相关模块
-    from protein_folding.interactions.miyazawa_jernigan_interaction import MiyazawaJerniganInteraction
-    from protein_folding.peptide.peptide import Peptide
-    from protein_folding.protein_folding_problem import ProteinFoldingProblem
-    from protein_folding.penalty_parameters import PenaltyParameters
-    from protein_folding.protein_folding_result import ProteinFoldingResult
-    from src.protein_folding.utils.detailed_pdb_generator import convert_xyz_to_detailed_pdb
+    print(f"\n[模块] 正在导入核心组件...")
+    try:
+        from protein_folding.interactions.miyazawa_jernigan_interaction import MiyazawaJerniganInteraction
+        from protein_folding.peptide.peptide import Peptide
+        from protein_folding.protein_folding_problem import ProteinFoldingProblem
+        from protein_folding.penalty_parameters import PenaltyParameters
+        from protein_folding.protein_folding_result import ProteinFoldingResult
+        from src.protein_folding.utils.detailed_pdb_generator import convert_xyz_to_detailed_pdb
+        print("✅ 蛋白质折叠核心模块导入成功")
+    except ImportError as e:
+        print(f"❌ 模块导入失败: {e}")
+        return
 
     # 1. 构建蛋白质折叠问题模型
+    print(f"\n[结构] 正在构建蛋白质主链与物理模型...")
     # 创建肽对象：包含主链序列和侧链序列（这里设为空字符串）
     peptide = Peptide(args.main_chain, [""] * len(args.main_chain))
     
@@ -428,8 +616,14 @@ def main():
     # 生成对应的量子比特哈密顿量
     qubit_op = problem.qubit_op()
     num_qubits = qubit_op.num_qubits  # 获取所需量子比特数
+    print(f"✅ 问题建模完成 | 所需量子比特数: {num_qubits}")
+
+    # 预处理哈密顿量以加速计算
+    processed_hamiltonian = preprocess_qubit_op(qubit_op)
+    print(f"✅ 哈密顿量预处理完成 ({len(processed_hamiltonian)} 项)")
 
     # 2. 根据参数选择合适的量子计算后端
+    print(f"\n[算法] 正在配置量子后端与采样器...")
     backend_info = setup_sampler_backend(
         args.backend, 
         args.aws_region, 
@@ -441,9 +635,9 @@ def main():
     )
     backend = backend_info['backend']
     sampler_v2 = backend_info['sampler_v2']
-    print(f"✓ 量子后端已就绪 | 量子比特数: {num_qubits}")
+    print(f"✅ 后端初始化就绪: {args.backend}")
 
-    # 3. 构建参数化量子电路
+    print(f"\n[电路] 正在构建与转译 Variational Ansatz...")
     # 使用RealAmplitudes作为变分波函数 ansatz
     ansatz = RealAmplitudes(num_qubits=num_qubits, reps=args.ansatz_reps)
     
@@ -461,18 +655,24 @@ def main():
     clean_circuit.measure_all()
     
     # 根据后端类型决定是否转译电路
-    # 本地模拟器通常不需要转译，而云量子设备需要针对硬件特性进行转译
     if args.backend.lower() in ['local', 'local_aer', 'local_qiskit']:
-        # 对于本地模拟器，直接使用原始电路
         transpiled_circuit = clean_circuit
     else:
-        # 对于其他后端，特别是云端设备，需要转译电路以适配目标设备的拓扑和门集
         transpiled_circuit = transpile(clean_circuit, backend=backend,
                                         initial_layout=list(range(clean_circuit.num_qubits)),
                                         optimization_level=3
                                       )
-    print(f"   逻辑比特数 (算法需求): {clean_circuit.num_qubits}")
-    print(f"   转译后物理比特数 (硬件占用): {transpiled_circuit.num_qubits}")
+    
+    # 缓存电路指标
+    ops = transpiled_circuit.count_ops()
+    single_q = sum(ops.get(gate, 0) for gate in ['h', 'rx', 'ry', 'rz', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg', 'u1', 'u2', 'u3', 'p'])
+    two_q = sum(ops.get(gate, 0) for gate in ['cx', 'cz', 'swap', 'ecr', 'rxx', 'ryy', 'rzz'])
+    depth = transpiled_circuit.depth()
+    
+    print(f"✅ 电路转译完成:")
+    print(f"   - 逻辑量子比特: {clean_circuit.num_qubits}")
+    print(f"   - 物理量子比特: {transpiled_circuit.num_qubits}")
+    print(f"   - 门统计: 单比特={single_q}, 双比特={two_q}, 深度={depth}")
     
     # 干跑模式 (Dry-Run)
     if args.dry_run:
@@ -492,6 +692,7 @@ def main():
             raise e
 
     all_conv_data = []
+    all_iteration_timings = []
     global_candidates = [] # 初始化全球候选池
     best_energy = float('inf')
     best_results_tuple = None # 将在第一次实验后初始化
@@ -502,50 +703,48 @@ def main():
     try:
         with open(iteration_csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy', 'quantum_time', 'queue_time', 'classical_time', 'total_time'])
         print(f"✓ 已创建全局迭代记录文件: {iteration_csv_path}")
     except Exception as e:
         print(f"⚠ 创建 CSV 文件失败: {e}")
         iteration_csv_path = None
     
-    # 开始 Multi-Restart 循环
+    # ====================
+    # 多实验运行循环 (Multi-Restart Loop)
+    # ====================
+    print(f"\n[任务] 开始多轮运行实验 (共 {args.restarts} 轮)...")
+    
+    best_energy = float('inf')
+    best_trial_idx = -1
+    best_results_tuple = None
+    global_candidates = []
+
     for trial_idx in range(args.restarts):
-        print(f"\n" + "="*60)
-        print(f"--- 实验 {trial_idx + 1}/{args.restarts} (Multi-Restart) ---")
-        print(f"随机种子: {args.random_seed + trial_idx}")
-        np.random.seed(args.random_seed + trial_idx)
+        current_seed = args.random_seed + trial_idx
+        np.random.seed(current_seed)
+        print(f"\n▶ 实验 {trial_idx + 1}/{args.restarts} 启动 (随机种子: {current_seed})")
         
-        # 加载 Warm-Start 初始参数 (如果指定)
-        if args.initial_params:
-            try:
-                with open(args.initial_params, 'r') as f:
-                    params_data = json.load(f)
-                    args.initial_point = np.array(params_data['initial_point'])
-                    print(f"✓ 已加载 Warm-Start 参数向量 (维度: {len(args.initial_point)})")
-            except Exception as e:
-                print(f"⚠ 加载初始参数失败: {e}，将使用随机初始化")
-                args.initial_point = None
-        else:
-            args.initial_point = None
+        # 定义状态变量以追踪当前实验
+        convergence_history = []
+        std_history = []
+        iteration_results = []
+        all_top_energies = []
+        cumulative_shots_history = []
+        iteration_shots_history = []
+        all_iteration_timings = []
+        
+        _last_objective_time = [time.perf_counter()]
+        _trial_best_energy = [float('inf')] # 追踪当前 Trial 的最佳能量
         
         trial_dir = os.path.join(RESULT_DIR, f"trial_{trial_idx + 1}")
         os.makedirs(trial_dir, exist_ok=True)
-        
-        convergence_history = []
-        std_history = [] 
-        cumulative_shots_history = []  
-        iteration_shots_history = []  
-        iteration_results = []  
-        all_top_energies = []
-        
         iteration_result_dir = os.path.join(trial_dir, "iter_all_results")
         os.makedirs(iteration_result_dir, exist_ok=True)
 
         def objective_function(params):
-            """
-            优化目标函数
-            该函数接受参数，执行量子电路，使用CVaR策略计算能量，并返回用于优化的值
-            """
+            iter_tracker = QuantumTimeTracker()
+            iter_tracker.iteration_start = time.perf_counter()
+            
             # 执行量子电路
             current_shots = args.shots
             if args.adaptive_shots:
@@ -555,126 +754,118 @@ def main():
                     ratio = min(current_iter / (max_iter - 1), 1.0)
                     current_shots = int(args.min_shots + (args.max_shots - args.min_shots) * ratio)
 
-            if sampler_v2:
-                job = sampler_v2.run([(transpiled_circuit, params)], shots=current_shots)
-            else:
-                bound_circ = transpiled_circuit.assign_parameters(params)
-                job = backend.run(bound_circ, shots=current_shots)
+            iter_tracker.submit_time = time.perf_counter()
+            try:
+                if sampler_v2:
+                    job = sampler_v2.run([(transpiled_circuit, params)], shots=current_shots)
+                    result = job.result()[0]
+                    data_name = 'meas' if 'meas' in result.data else next(iter(result.data))
+                    counts = result.data[data_name].get_counts()
+                else:
+                    bound_circ = transpiled_circuit.assign_parameters(params)
+                    job = backend.run(bound_circ, shots=current_shots)
+                    counts = job.result().get_counts()
+            except Exception as e:
+                print(f"   ❌ 量子计算作业失败: {e}")
+                return 100.0
             
-            # 记录 Job ID
-            JobRecorder.record_job(job, trial_dir, label=f"sampler_step_{len(convergence_history)+1}")
-            
-            if sampler_v2:
-                result = job.result()[0]
-                data_name = 'meas' if 'meas' in result.data else next(iter(result.data))
-                counts = result.data[data_name].get_counts()
-            else:
-                counts = job.result().get_counts()
+            iter_tracker.result_received = time.perf_counter()
+            iter_tracker.iteration_end = iter_tracker.result_received
+            iter_tracker.extract_from_job(job, args.backend)
             
             actual_shots = sum(counts.values())
-            energy = calculate_cvar_energy(counts, qubit_op, args.alpha)
+            # 使用高效算法计算 CVaR 能量
+            energy = calculate_cvar_energy_efficient(counts, qubit_op, args.alpha, processed_hamiltonian)
             
-            # 计算标准差
-            energies_std = [estimate_energy_from_bitstring(bs, qubit_op) for bs in counts.keys()]
+            # 更新历史记录
+            convergence_history.append(energy)
+            iteration_shots_history.append(actual_shots)
+            cumulative_shots_history.append((cumulative_shots_history[-1] if cumulative_shots_history else 0) + actual_shots)
+
+            # 方差估算 (标准差)
+            energies_std = [estimate_energy_fast(bs, processed_hamiltonian) for bs in counts.keys()]
             weights_std = [counts[bs] for bs in counts.keys()]
             mean_std = np.average(energies_std, weights=weights_std) if energies_std else 0
             std_e = np.sqrt(np.average((np.array(energies_std) - mean_std)**2, weights=weights_std)) if energies_std else 0
             std_history.append(std_e)
             
-            top_results = extract_top_results(counts, qubit_op, max(args.max_results * 5, 20) if args.unique_structures else args.max_results)
-            top_energies = [result[1] for result in top_results]
-            
-            convergence_history.append(energy)
-            iteration_shots_history.append(actual_shots)
-            cumulative_shots_history.append((cumulative_shots_history[-1] if cumulative_shots_history else 0) + actual_shots)
+            # 提取 Top 结果
+            top_results = extract_top_results(counts, qubit_op, args.max_results, processed_hamiltonian)
+            top_energies = [r[1] for r in top_results]
             all_top_energies.append(top_energies)
+
+            # 检查是否发现新低能量（结构解析节流）
+            energy_improved = False
+            if energy < _trial_best_energy[0]:
+                _trial_best_energy[0] = energy
+                energy_improved = True
             
-            if len(convergence_history) % 2 == 0:
-                print(f"    迭代 {len(convergence_history)}: CVaR能量 = {energy:.4f}, 实际shots = {actual_shots}")
-            
-            # 计算量子电路指标
-            ops = transpiled_circuit.count_ops()
-            if len(convergence_history) == 1:
-                print(f"    电路门操作详情: {ops}")
-            single_qubit_gates = sum(ops.get(gate, 0) for gate in ['h', 'rx', 'ry', 'rz', 'x', 'y', 'z', 's', 't', 'sdg', 'tdg', 'u1', 'u2', 'u3', 'p'])
-            two_qubit_gates = sum(ops.get(gate, 0) for gate in ['cx', 'cz', 'swap', 'ecr', 'rxx', 'ryy', 'rzz'])
-            circuit_depth = transpiled_circuit.depth()
-            if len(convergence_history) == 1:
-                print(f"    门统计: 单比特={single_qubit_gates}, 双比特={two_qubit_gates}, 总计={single_qubit_gates + two_qubit_gates}, 深度={circuit_depth}")
-            
-            # 生成蛋白质结构信息
             protein_structure_info = {}
-            if top_results:
-                best_bitstring = top_results[0][0]
+            if energy_improved or len(convergence_history) % 10 == 0:
                 try:
-                    # 使用 ProteinFoldingResult 解析蛋白质结构
-                    raw_result = MockResult({best_bitstring: 1.0}, top_results[0][1], {best_bitstring: top_results[0][2]}, actual_shots)
-                    protein_result = problem.interpret(raw_result)
-                    
-                    # 获取转向序列
-                    turn_sequence = protein_result.turn_sequence
-                    
-                    # 获取 XYZ 坐标
-                    xyz_data = protein_result.protein_shape_file_gen.get_xyz_data()
-                    xyz_coordinates = [[row[0], float(row[1]), float(row[2]), float(row[3])] for row in xyz_data] if xyz_data is not None else []
-                    
+                    best_bitstring = top_results[0][0]
+                    raw_res = MockResult({best_bitstring: 1.0}, top_results[0][1], {best_bitstring: top_results[0][2]}, actual_shots)
+                    p_res = problem.interpret(raw_res)
+                    xyz_data = p_res.protein_shape_file_gen.get_xyz_data()
                     protein_structure_info = {
-                        "turn_sequence": turn_sequence,
-                        "xyz_coordinates": xyz_coordinates,
+                        "turn_sequence": p_res.turn_sequence,
+                        "xyz_coordinates": [[row[0], float(row[1]), float(row[2]), float(row[3])] for row in xyz_data] if xyz_data is not None else [],
                         "best_bitstring": best_bitstring
                     }
-                except Exception as e:
-                    protein_structure_info = {"error": str(e), "best_bitstring": best_bitstring}
+                    if energy_improved:
+                        print(f"   ⭐ 发现更低能量: {energy:.4f} | 序列: {p_res.turn_sequence}")
+                except:
+                    pass
+
+            # 时间统计
+            current_time = time.perf_counter()
+            iter_time = current_time - _last_objective_time[0]
+            q_time = iter_tracker.quantum_time
+            queue_time = iter_tracker.queue_time
+            c_time = max(0.0, iter_time - q_time - queue_time)
+            
+            timing_info = {
+                "quantum_time": round(q_time, 3),
+                "queue_time": round(queue_time, 3),
+                "classical_time": round(c_time, 3),
+                "total_time": round(iter_time, 3)
+            }
+            if len(convergence_history) % 5 == 0:
+                print(f"   [迭代 {len(convergence_history)}] 能量={energy:.4f} | ⏱ 量子={q_time:.2f}s, 经典={c_time:.2f}s")
+            
+            all_iteration_timings.append(timing_info)
+            _last_objective_time[0] = current_time
             
             iteration_data = {
                 "iteration": len(convergence_history),
                 "cvar_energy": energy,
-                "top_energies": top_energies,
-                "top_results": [(result[0], float(result[1]), result[2]) for result in top_results],
-                "total_counts": len(counts),
+                "top_results": top_results,
                 "actual_shots": actual_shots,
-                "counts": counts,
-                "single_qubit_gates": single_qubit_gates,
-                "two_qubit_gates": two_qubit_gates,
-                "circuit_depth": circuit_depth,
-                "protein_structure": protein_structure_info
+                "timing": timing_info,
+                "protein_structure": protein_structure_info,
+                "counts": counts
             }
             iteration_results.append(iteration_data)
             
-            # 保存单轮迭代 JSON
+            # 保存单轮 JSON (包含结构信息)
             with open(os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json'), 'w') as f:
                 json.dump({
-                    "iteration": iteration_data["iteration"],
-                    "cvar_energy": energy,
-                    "top_results": [{"bitstring": r[0], "energy": r[1]} for r in iteration_data["top_results"]],
-                    "single_qubit_gates": single_qubit_gates,
-                    "two_qubit_gates": two_qubit_gates,
-                    "circuit_depth": circuit_depth,
+                    "iteration": len(convergence_history),
+                    "energy": energy,
+                    "top_results": [{"bitstring": r[0], "energy": float(r[1]), "count": int(r[2])} for r in top_results],
+                    "timing": timing_info,
+                    "protein_structure": protein_structure_info,
                     "shots": actual_shots,
-                    "protein_structure": protein_structure_info
+                    "circuit_metrics": {"single": single_q, "two": two_q, "depth": depth}
                 }, f, indent=2)
             
-            # 写入 CSV 记录
+            # 写入全局 CSV
             if iteration_csv_path:
                 try:
-                    total_gates = single_qubit_gates + two_qubit_gates
                     with open(iteration_csv_path, 'a', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow([
-                            trial_idx + 1,
-                            len(convergence_history),
-                            args.backend,
-                            total_gates,
-                            single_qubit_gates,
-                            two_qubit_gates,
-                            circuit_depth,
-                            actual_shots,
-                            energy,
-                            cumulative_shots_history[-1] if cumulative_shots_history else 0,
-                            energy
-                        ])
-                except Exception as e:
-                    print(f"⚠ 写入 CSV 失败: {e}")
+                        writer.writerow([trial_idx + 1, len(convergence_history), args.backend, single_q + two_q, single_q, two_q, depth, actual_shots, energy, cumulative_shots_history[-1], energy, q_time, queue_time, c_time, iter_time])
+                except: pass
             
             return energy
 
@@ -708,17 +899,44 @@ def main():
     # 全局分析与去重 (Global Analysis)
     # ====================
     print(f"\n" + "="*60)
-    print(f"所有实验结束。最佳实验: {best_trial_idx} (能量: {best_energy:.4f})")
+    print(f"📊 所有实验结束 | 最佳实验: Trial {best_trial_idx} (最低能量: {best_energy:.4f})")
     print(f"正在进行跨运行结果汇总与去重...")
     
     # 解包最佳结果供可视化
     res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history = best_results_tuple
     
+    # 构建可视化数据对象
+    all_conv_data = [{
+        'counts': list(range(len(convergence_history))), 
+        'values': convergence_history, 
+        'stds': std_history,
+        'cumulative_shots': cumulative_shots_history, 
+        'iteration_shots': iteration_shots_history,
+        'label': f'Best Trial ({best_trial_idx})'
+    }]
+    
+    # 添加 Top 子能量曲线
+    if all_top_energies:
+        for i in range(min(args.max_results, len(all_top_energies[0]))):
+            top_i_energies = [energies[i] if i < len(energies) else None for energies in all_top_energies]
+            valid_counts = []
+            valid_energies = []
+            for j, eval_energy in enumerate(top_i_energies):
+                if eval_energy is not None:
+                    valid_counts.append(j)
+                    valid_energies.append(eval_energy)
+            all_conv_data.append({
+                'counts': valid_counts, 
+                'values': valid_energies, 
+                'label': f'Trial {best_trial_idx} Top {i+1} Energy'
+            })
+    
     # 汇总去重逻辑
     unique_candidates = {}
-    for bs, en, count in global_candidates:
-        if bs not in unique_candidates or en < unique_candidates[bs][0]:
-            unique_candidates[bs] = (en, count)
+    for iter_data in iteration_results:
+        for bs, en, count in iter_data.get("top_results", []):
+            if bs not in unique_candidates or en < unique_candidates[bs][0]:
+                unique_candidates[bs] = (en, count)
     
     sorted_candidates = sorted(unique_candidates.items(), key=lambda x: x[1][0])
     
@@ -729,8 +947,6 @@ def main():
         
         for bitstring, (energy, count) in sorted_candidates:
             try:
-                # 临时解析结构用于去重
-                # 注意：此时 total_shots 并不重要，只为了解析结构
                 temp_mock_result = MockResult({bitstring: 1.0}, energy, {bitstring: count}, 100)
                 temp_result = problem.interpret(temp_mock_result)
                 structure_sig = str(temp_result.turn_sequence)
@@ -747,108 +963,40 @@ def main():
     else:
         final_top_results = [(bs, en, count) for bs, (en, count) in sorted_candidates[:args.max_results]]
 
-    # 准备可视化数据
-    all_conv_data = [{
-        'counts': list(range(len(convergence_history))), 
-        'values': convergence_history, 
-        'stds': std_history,
-        'cumulative_shots': cumulative_shots_history, 
-        'iteration_shots': iteration_shots_history,
-        'label': f'Best Trial ({best_trial_idx})'
-    }]
-    
-    # 原有的 all_top_energies 可视化 (来自最佳 Trial)
-    if all_top_energies:
-        for i in range(min(args.max_results, len(all_top_energies[0]))):
-            top_i_energies = [energies[i] if i < len(energies) else None for energies in all_top_energies]
-            valid_counts = []
-            valid_energies = []
-            for j, energy in enumerate(top_i_energies):
-                if energy is not None:
-                    valid_counts.append(j)
-                    valid_energies.append(energy)
-            all_conv_data.append({
-                'counts': valid_counts, 
-                'values': valid_energies, 
-                'label': f'Trial {best_trial_idx} Top {i+1} Energy'
-            })
-
     # --- 结果解析与保存 ---
-    print(f"    - 正在保存最终结果到 {RESULT_DIR}...")
+    print(f"\n[存档] 正在保存最终结果到 {RESULT_DIR}...")
     
-    # 查找最佳实验的最终计数，用于 MockResult (虽然主要用于展示分布)
-    final_counts = {}
-    if iteration_results:
-        # 获取最佳实验最后一次迭代的 counts
-        final_counts = iteration_results[-1].get("counts", {})
+    # 查找最佳实验的最终计数
+    final_counts = iteration_results[-1].get("counts", {}) if iteration_results else {}
     total_shots = sum(final_counts.values()) if final_counts else args.shots
-    
-    # 将迭代结果转换为可序列化格式
-    processed_iteration_results = []
-    for iter_data in iteration_results:
-        processed_top_results = [
-            {"bitstring": r[0], "energy": float(r[1]), "count": r[2]}
-            for r in iter_data.get("top_results", [])
-        ]
-        processed_iteration_results.append({
-            "iteration": iter_data["iteration"],
-            "cvar_energy": iter_data["cvar_energy"],
-            "top_energies": [float(e) for e in iter_data.get("top_energies", [])],
-            "top_results": processed_top_results,
-            "total_counts": iter_data.get("total_counts", 0),
-            "actual_shots": iter_data.get("actual_shots", 0)
-        })
     
     # 为每个最优结果生成蛋白质结构和文件
     for idx, (bitstring, energy, count) in enumerate(final_top_results):
-        print(f"\n    - 结果 {idx+1}/{args.max_results}: 能量 = {energy:.4f}, 出现次数 = {count}")
+        print(f"    - 结果 {idx+1}/{len(final_top_results)}: 能量 = {energy:.4f}, 采样频次 = {count}")
         
-        # 使用全局定义的 MockResult 级解析蛋白质结构
         raw_res = MockResult({bitstring: 1.0}, energy, final_counts, total_shots)
         result = problem.interpret(raw_res)
+        print(f"      转向序列: {result.turn_sequence}")
         
-        print(f"    - 转向序列: {result.turn_sequence}")
-        
-        # 1. 保存JSON格式的结果参数
         xyz_data = result.protein_shape_file_gen.get_xyz_data()
-        result_data = {
-            "result_index": idx + 1,
-            "energy": energy,
-            "turn_sequence": result.turn_sequence,
-            "main_chain_sequence": args.main_chain,
-            "shots_requested": args.shots,
-            "bitstring": bitstring,
-            "count": count,
-            "max_results": args.max_results,
-            "optimization_convergence": {
-                "evaluation_counts": list(range(len(convergence_history))),
-                "cvar_energy_values": convergence_history,
-                "cumulative_shots": cumulative_shots_history,
-                "iteration_shots": iteration_shots_history
-            },
-            "iteration_results": processed_iteration_results,
-            "xyz_coordinates": [list(row) for row in xyz_data] if xyz_data is not None else []
-        }
+        
+        # 1. 保存 JSON
         json_path = os.path.join(RESULT_DIR, f'result_{idx+1}_energy_{energy:.4f}.json')
         with open(json_path, 'w') as f:
-            json.dump(result_data, f, indent=2)
-        print(f"    ✓ JSON文件已保存: {json_path}")
+            json.dump({"rank": idx+1, "energy": energy, "turn": result.turn_sequence, "bits": bitstring, "count": count}, f, indent=2)
         
-        # 2. 保存详细 PDB 文件
+        # 2. 保存 PDB
         if xyz_data is not None:
             pdb_path = os.path.join(RESULT_DIR, f'structure_{idx+1}_energy_{energy:.4f}.pdb')
             convert_xyz_to_detailed_pdb(xyz_data, pdb_path, f"Structure {idx+1}")
-            print(f"    ✓ PDB文件已保存: {pdb_path}")
         
-        # 3. 保存 3D 结构图
+        # 3. 保存 PNG
         try:
             fig_struct = result.get_figure(title=f"Result {idx+1} (E={energy:.4f})")
             png_path = os.path.join(RESULT_DIR, f"structure_{idx+1}_energy_{energy:.4f}.png")
             fig_struct.savefig(png_path)
             plt.close(fig_struct)
-            print(f"    ✓ 结构图已保存: {png_path}")
-        except Exception as e:
-            print(f"    ⚠ 绘图失败: {e}")
+        except: pass
 
     # 生成优化过程的收敛图
     plt.figure(figsize=(12, 8))
@@ -945,70 +1093,88 @@ def main():
     except Exception as e:
         print(f"⚠ 导出最优参数时出错: {e}")
     
-    print(f"\n🎉 蛋白质折叠计算任务完成！所有结果保存在: {RESULT_DIR}")
+    print(f"\n🎉 蛋白质折叠计算任务完成！")
+    
+    # 时间汇总
+    try:
+        timing_summary = generate_timing_summary(all_iteration_timings, args.backend)
+        if timing_summary:
+            timing_path = os.path.join(RESULT_DIR, "timing_summary.json")
+            with open(timing_path, "w", encoding="utf-8") as f:
+                json.dump(timing_summary, f, indent=2)
+            print(f"\n[时间汇总]:")
+            print(f"  - 总量子时间: {timing_summary['total_quantum_time']:.3f}s")
+            print(f"  - 总队列时间: {timing_summary['total_queue_time']:.3f}s")
+            print(f"  - 总经典时间: {timing_summary['total_classical_time']:.3f}s")
+            print(f"  - 任务总耗时: {timing_summary['total_time']:.3f}s")
+    except Exception:
+        pass
+
+    # 导出最优向量
+    try:
+        if res is not None and hasattr(res, 'x'):
+            best_params_file = os.path.join(RESULT_DIR, "best_params.json")
+            with open(best_params_file, 'w') as f:
+                json.dump({
+                    "initial_point": res.x.tolist(),
+                    "energy": best_energy,
+                    "best_trial": best_trial_idx
+                }, f, indent=2)
+            print(f"✅ 最优参数向量已导出: {best_params_file}")
+            print(f"   (提示: 可使用 --initial_params 进行热启动)")
+    except Exception as e:
+        print(f"⚠ 导出最优参数失败: {e}")
+    
+    print(f"\n🚀 所有结果已保存在: {RESULT_DIR}")
+    
+    # 最后生成 metrics.json 以供 metadata_logger 汇总到 protein_folding_jobs_detailed.csv
     try:
         metrics_path = os.path.join(RESULT_DIR, "metrics.json")
-        total_shots = 0
-        total_iters = 0
-        for d in all_conv_data:
-            if isinstance(d, dict) and 'iteration_shots' in d and isinstance(d['iteration_shots'], list):
-                try:
-                    total_shots += sum(int(x) for x in d['iteration_shots'])
-                    total_iters += len(d['iteration_shots'])
-                except:
-                    pass
-        try:
-            ops = transpiled_circuit.count_ops()
-            twoq = int(ops.get('cx', 0)) + int(ops.get('cz', 0)) + int(ops.get('swap', 0))
-            transpile_metrics = {
-                "logical_qubits": int(ansatz.num_qubits),
-                "physical_qubits": int(transpiled_circuit.num_qubits),
-                "depth": int(transpiled_circuit.depth() or 0),
-                "two_qubit_gates": twoq,
-                "ops": {k: int(v) for k, v in ops.items()}
-            }
-        except Exception:
-            transpile_metrics = {}
-        try:
-            per_run = []
-            for d in all_conv_data:
-                values = d.get('values', [])
-                counts = d.get('counts', [])
-                iters = len(values)
-                start = float(values[0]) if iters > 0 else None
-                end = float(values[-1]) if iters > 0 else None
-                min_e = float(min(values)) if iters > 0 else None
-                avg_drop = float((values[0] - values[-1]) / max(1, iters - 1)) if iters > 1 else 0.0
-                per_run.append({
-                    "iterations": iters,
-                    "energy_start": start,
-                    "energy_end": end,
-                    "min_energy": min_e,
-                    "avg_decrease_per_iter": avg_drop
-                })
-            convergence_metrics = {
-                "iterations_total": int(sum(len(d.get('values', [])) for d in all_conv_data)),
-                "best_energy": float(best_energy),
-                "per_run": per_run
-            }
-        except Exception:
-            convergence_metrics = {}
+        total_shots = sum(iteration_shots_history) if iteration_shots_history else 0
+        total_iters = len(convergence_history)
+        
+        # 整理转译指标
+        transpile_metrics = {
+            "logical_qubits": clean_circuit.num_qubits,
+            "physical_qubits": transpiled_circuit.num_qubits,
+            "depth": depth,
+            "total_gates": single_q + two_q,
+            "single_qubit_gates": single_q,
+            "two_qubit_gates": two_q,
+            "ops": dict(transpiled_circuit.count_ops())
+        }
+        
+        # 整理收敛指标
+        convergence_metrics = {
+            "iterations_total": total_iters,
+            "best_energy": float(best_energy),
+            "convergence_history": convergence_history
+        }
+        
         metrics = {
             "backend": args.backend,
             "shots_requested": int(args.shots),
             "shots_actual_total": int(total_shots),
             "iteration_count": int(total_iters),
             "outcome_summary": f"min_energy={float(best_energy):.6f}",
-            "qubits_used": int(ansatz.num_qubits),
-            "qubits_full": int(problem._qubit_op_full().num_qubits),
+            "qubits_used": clean_circuit.num_qubits,
+            "qubits_full": problem._qubit_op_full().num_qubits if hasattr(problem, '_qubit_op_full') else clean_circuit.num_qubits,
+            "total_quantum_time": timing_summary.get("total_quantum_time", 0.0) if timing_summary else 0.0,
+            "total_queue_time": timing_summary.get("total_queue_time", 0.0) if timing_summary else 0.0,
+            "total_classical_time": timing_summary.get("total_classical_time", 0.0) if timing_summary else 0.0,
+            "total_gates": transpile_metrics["total_gates"],
+            "single_qubit_gates": transpile_metrics["single_qubit_gates"],
+            "two_qubit_gates": transpile_metrics["two_qubit_gates"],
+            "circuit_depth": transpile_metrics["depth"],
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
-        print(f"✓ 指标摘要已保存到: {metrics_path}")
-    except Exception:
-        pass
+        print(f"✅ 全局指标摘要已保存 (用于元数据记录): {metrics_path}")
+    except Exception as e:
+        print(f"⚠ 生成最终指标失败: {e}")
+
 
 if __name__ == "__main__":
     main()

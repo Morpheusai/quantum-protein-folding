@@ -33,7 +33,18 @@ from typing import Optional, Dict, Any
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+import time
+import warnings
 from lib.job_metadata_logger import JobMetadataLogger
+from lib.quantum_optimizer import QuantumTimeTracker
+
+# 忽略 Scipy 稀疏矩阵效率警告（因 Qiskit 模拟器内部使用引起）
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+try:
+    from scipy.sparse import SparseEfficiencyWarning
+    warnings.filterwarnings("ignore", category=SparseEfficiencyWarning)
+except ImportError:
+    pass
 
 # 尝试导入 AWS Braket Provider
 try:
@@ -133,41 +144,100 @@ class GroundStateTracker:
             'two_qubit_gates': [],
             'circuit_depth': [],
             'shots': [],
-            'cumulative_shots': []
+            'cumulative_shots': [],
+            'timing': []
         }
+        self.timing_history = []
 
-    def callback(self, *args):
+    def callback(self, *args, **kwargs):
+        # 调试信息：打印 callback 接收到的所有参数
+        print(f"\n[CALLBACK DEBUG] 收到 {len(args)} 个位置参数，{len(kwargs)} 个关键字参数")
+        for i, arg in enumerate(args):
+            try:
+                print(f"  args[{i}] = {type(arg).__name__}: {arg}")
+            except Exception as e:
+                print(f"  args[{i}] = {type(arg).__name__} (无法打印：{e})")
+        
         if self.qiskit_version == 2:
+            # Qiskit 2.x callback 可能有不同的参数格式
+            # 尝试多种可能的格式
+            
+            # 格式 1: callback(intermediate_result, optimizer_state, f_val, metadata)
+            # 格式 2: callback(x_current, f_val_current, *metadata)
+            # 格式 3: callback(opt_result, *args)
+            
+            energy_recorded = False
+            iteration_incremented = False
+            
+            # 尝试从不同位置提取能量值
+            for idx in [2, 1, 0]:
+                if len(args) > idx:
+                    try:
+                        energy_val = float(args[idx])
+                        self.energy_history.append(energy_val)
+                        print(f"  [CALLBACK] 从 args[{idx}] 记录能量：{energy_val}")
+                        energy_recorded = True
+                        break
+                    except (TypeError, ValueError):
+                        continue
+            
+            if not energy_recorded:
+                print(f"  [CALLBACK] 未能从任何位置提取能量值")
+            
+            # 检查 metadata（通常在最后一个参数）
             if len(args) >= 4:
                 metadata = args[3]
-                if isinstance(metadata, dict) and "best_measurements" in metadata:
+            elif len(args) >= 2 and isinstance(args[-1], dict):
+                metadata = args[-1]
+            else:
+                metadata = None
+            
+            if metadata is not None and isinstance(metadata, dict):
+                if "best_measurements" in metadata:
                     best_measurements = metadata["best_measurements"]
+                    
                     for measurement in best_measurements:
-                        if measurement["state"] == self.int_ground_state:
+                        if isinstance(measurement, dict) and measurement.get("state") == self.int_ground_state:
                             self.shots_to_ground_state = self.num_shots
                             self.gs_found = True
                             break
                     
-                    if not self.gs_found:
-                        self.num_shots += self.args.shots
-                        self.iterations += 1
+                    # 无论是否找到基态，都增加迭代计数
+                    self.iterations += 1
+                    self.num_shots += self.args.shots
+                    iteration_incremented = True
+                    print(f"  [CALLBACK] iterations={self.iterations}, gs_found={self.gs_found}")
+                    
+                    # 记录电路信息
+                    self.circuit_info['shots'].append(self.args.shots)
+                    self.circuit_info['cumulative_shots'].append(self.num_shots)
+                    
+                    # 记录时间分解
+                    if self.timing_history:
+                        self.circuit_info['timing'].append(self.timing_history[-1])
+                else:
+                    # metadata 存在但没有 best_measurements
+                    self.iterations += 1
+                    self.num_shots += self.args.shots
+                    iteration_incremented = True
+                    print(f"  [CALLBACK] metadata 无 best_measurements, iterations={self.iterations}")
+            
+            # 如果没有 metadata，但有至少 2 个参数，仍然增加迭代
+            if not iteration_incremented and len(args) >= 2:
+                self.iterations += 1
+                self.num_shots += self.args.shots
+                print(f"  [CALLBACK] 无 metadata, iterations={self.iterations}")
+                
+        else:
+            # Qiskit 1.x 的处理逻辑
+            if len(args) >= 1:
+                all_bitstrings = args[0]
+                if hasattr(all_bitstrings, '__iter__') and self.int_ground_state in all_bitstrings:
+                    self.shots_to_ground_state = self.num_shots
+                    self.gs_found = True
                 else:
                     self.num_shots += self.args.shots
                     self.iterations += 1
-                
-                if len(args) >= 3:
-                    self.energy_history.append(float(args[2]))
-                    self.iteration_history.append(self.iterations)
-                    self.circuit_info['shots'].append(self.args.shots)
-                    self.circuit_info['cumulative_shots'].append(self.num_shots)
-        else:
-            all_bitstrings = args[0]
-            if self.int_ground_state in all_bitstrings:
-                self.shots_to_ground_state = self.num_shots
-                self.gs_found = True
-            else:
-                self.num_shots += self.args.shots
-                self.iterations += 1
 
 
 class CallTracker:
@@ -215,7 +285,50 @@ def save_csv_result(csv_path: Path, result_dict: Dict[str, Any]) -> None:
         writer.writerow(result_dict)
 
 
-def create_sampler(backend: str, simulator: str, shots: int):
+class TimingSamplerWrapper:
+    """采样器包装类，用于拦截 run 调用并记录时间信息"""
+    def __init__(self, base_sampler, tracker_list, backend_name):
+        self._base_sampler = base_sampler
+        self._tracker_list = tracker_list
+        self._backend_name = backend_name
+
+    def run(self, pubs, **kwargs):
+        submit_time = time.perf_counter()
+        job = self._base_sampler.run(pubs, **kwargs)
+        
+        # 记录原始 result 方法
+        original_result = job.result
+        
+        def wrapped_result(*args, **kwargs_inner):
+            res = original_result(*args, **kwargs_inner)
+            received_time = time.perf_counter()
+            
+            timing = QuantumTimeTracker()
+            timing.submit_time = submit_time
+            timing.result_received = received_time
+            timing.iteration_start = submit_time
+            timing.iteration_end = received_time
+            timing.extract_from_job(job, self._backend_name)
+            
+            self._tracker_list.append(timing.to_dict())
+            
+            # 在终端输出时间分解
+            last_timing = self._tracker_list[-1]
+            print(
+                f"    [TIMING] Quantum={last_timing['quantum_time']:.3f}s, "
+                f"Queue={last_timing['queue_time']:.3f}s, "
+                f"Classical={last_timing['classical_time']:.3f}s, "
+                f"Total={last_timing['total_time']:.3f}s"
+            )
+            
+            return res
+            
+        # 动态替换方法
+        job.result = wrapped_result
+        return job
+
+
+def create_sampler(backend: str, simulator: str, shots: int, tracker_list=None):
     """创建采样器"""
     # 检查 Qiskit 是否可用
     if not QISKIT_AVAILABLE:
@@ -230,7 +343,7 @@ def create_sampler(backend: str, simulator: str, shots: int):
             if StatevectorSampler is None:
                 print("错误: StatevectorSampler 不可用")
                 return None
-            return StatevectorSampler(default_shots=shots, seed=42)
+            sampler = StatevectorSampler(default_shots=shots, seed=42)
         else:
             if BackendSampler is None:
                 print("错误: BackendSampler 不可用")
@@ -242,9 +355,13 @@ def create_sampler(backend: str, simulator: str, shots: int):
                 "optimization_level": 3,
                 "resilience_level": 3,
             }
-            return BackendSampler(
+            sampler = BackendSampler(
                 backend=simulator_obj, options=backend_options, bound_pass_manager=PassManager()
             )
+        
+        if tracker_list is not None:
+            return TimingSamplerWrapper(sampler, tracker_list, backend)
+        return sampler
     else:
         if not BRAKET_AVAILABLE:
             print("错误: qiskit-braket-provider 未安装。请安装:")
@@ -278,13 +395,22 @@ def create_sampler(backend: str, simulator: str, shots: int):
         if QISKIT_VERSION == 2:
             # Qiskit 2.x 使用不同的选项格式
             backend_options = {"default_shots": shots}
-            return BackendSamplerV2(backend=backend_obj, options=backend_options)
+            base_sampler = BackendSamplerV2(backend=backend_obj, options=backend_options)
+            # 使用 TranspilingSampler 包装以避免 Braket 后端的重复测量问题
+            import sys
+            sys.path.insert(0, '/home/ubuntu/workspace/quantum/qthesis-pf/src')
+            from backend.transpiling_sampler import TranspilingSampler
+            sampler = TranspilingSampler(base_sampler, backend_obj)
         else:
             # Qiskit 1.x 使用原来的选项格式
             backend_options = {"shots": shots}
-            return BackendSampler(
+            sampler = BackendSampler(
                 backend=backend_obj, options=backend_options, bound_pass_manager=PassManager()
             )
+        
+        if tracker_list is not None:
+            return TimingSamplerWrapper(sampler, tracker_list, backend)
+        return sampler
 
 
 def parse_args():
@@ -435,15 +561,42 @@ def run_qaoa(
     initial_point = get_initial_parameters(layers, cost_bound=0.1, mixer_bound=1.0)
     initial_state = get_symmetry_preserving_initial_state(num_res=num_res, num_rot=num_rot)
     
-    sampler = create_sampler(backend, simulator, shots)
-    if sampler is None:
-        return None
-    
     class Args:
         def __init__(self, shots):
             self.shots = shots
-    
+
     tracker = GroundStateTracker(int_ground_state, Args(shots), qiskit_version=QISKIT_VERSION)
+    
+    # 创建采样器 - 根据后端类型决定是否使用包装器
+    if backend == "local":
+        # 本地后端：使用包装器来跟踪时间
+        sampler = create_sampler(backend, simulator, shots, tracker_list=tracker.timing_history)
+    else:
+        # AWS 后端：使用 TranspilingSampler 避免重复测量问题，同时使用 TimingSamplerWrapper 跟踪时间
+        import sys
+        sys.path.insert(0, '/home/ubuntu/workspace/quantum/qthesis-pf/src')
+        from backend.transpiling_sampler import TranspilingSampler
+        
+        # 先创建基础 sampler（不带 tracker）
+        base_sampler = create_sampler(backend, simulator, shots)
+        
+        # 获取 backend 对象用于 TranspilingSampler
+        if not BRAKET_AVAILABLE:
+            print("错误：qiskit-braket-provider 未安装")
+            return None
+        
+        from qiskit_braket_provider import BraketProvider
+        provider = BraketProvider()
+        backend_names = {"aws_sv1": "SV1", "aws_garnet": "Garnet", "aws_forte": "Forte"}
+        backend_obj = provider.get_backend(backend_names.get(backend, "SV1"))
+        
+        # 用 TranspilingSampler 包装以解决重复测量问题
+        transpiled_sampler = TranspilingSampler(base_sampler, backend_obj)
+        
+        # 再用 TimingSamplerWrapper 包装以跟踪时间
+        sampler = TimingSamplerWrapper(transpiled_sampler, tracker.timing_history, backend)
+    if sampler is None:
+        return None
     
     # 创建 QAOA 实例
     qaoa = QAOA(
@@ -457,275 +610,46 @@ def run_qaoa(
         aggregation=alpha,
     )
     qaoa.optimizer.set_options(maxiter=10_000)
-    
-    # 对于 AWS 后端，采用更彻底的解决方案
+        
+    # 对于 AWS 后端，直接在量子计算机上进行完整的参数优化
     if backend != "local":
-        print("为 AWS 后端构建完全安全的 QAOA 实现...")
+        print("在量子后端上执行完整的 QAOA 优化...")
+        print(f"优化器：COBYLA, 最大迭代次数：10,000")
+        print(f"每次迭代都将在 {backend} 上执行量子电路\n")
         
-        # 方法1：首先尝试使用本地模拟器预处理，然后使用 AWS 执行
-        print("步骤1: 使用本地模拟器进行参数优化...")
+        # 直接使用 AWS 量子后端进行完整的参数优化
+        print("开始量子优化过程...")
         
-        # 创建本地模拟器进行参数优化
-        local_sampler = create_sampler("local", simulator, shots)
-        if local_sampler is None:
-            print("错误: 无法创建本地模拟器")
-            return None
-        
-        # 使用本地模拟器优化参数
-        qaoa_local = QAOA(
-            sampler=local_sampler,
-            optimizer=COBYLA(),
-            reps=layers,
-            initial_state=initial_state,
-            mixer=mixer,
-            initial_point=initial_point,
-            callback=tracker.callback,
-            aggregation=alpha,
-        )
-        qaoa_local.optimizer.set_options(maxiter=100)  # 减少迭代次数用于测试
-        
-        print("在本地模拟器上优化参数...")
-        local_result = qaoa_local.compute_minimum_eigenvalue(q_hamiltonian)
-        
-        # 获取优化后的参数
-        optimized_params = qaoa_local.optimal_params if hasattr(qaoa_local, 'optimal_params') else initial_point
-        
-        print("步骤2: 使用 AWS 后端执行优化后的电路...")
-        
-        # 方法2：手动构建最终的 QAOA 电路并执行一次测量
-        from qiskit.circuit.library import QAOAAnsatz
-        from qiskit import QuantumCircuit
-        
-        # 构建 QAOA 电路
-        qaoa_circuit = QAOAAnsatz(
-            cost_operator=q_hamiltonian,
-            reps=layers,
-            initial_state=initial_state,
-            mixer_operator=mixer
-        )
-        
-        # 绑定优化后的参数
-        if hasattr(qaoa_circuit, 'assign_parameters'):
-            qaoa_circuit = qaoa_circuit.assign_parameters(optimized_params)
-        
-        # 创建最终的测量电路
-        final_circuit = QuantumCircuit(qaoa_circuit.num_qubits)
-        final_circuit.compose(qaoa_circuit, inplace=True)
-        
-        # 只添加一次测量
-        final_circuit.measure_all()
-        
-        print("在 AWS 后端执行最终电路...")
-        
-        # 使用 AWS 后端执行最终电路
-        try:
-            # 直接使用采样器执行电路
-            job = sampler.run([final_circuit], shots=shots)
-            sampler_result = job.result()
-            
-            # 处理结果 - 适应 Qiskit 2.x 的结果格式
-            print(f"采样结果类型: {type(sampler_result)}")
-            print(f"采样结果属性: {dir(sampler_result)}")
-            
-            # 尝试不同的结果获取方式
-            if hasattr(sampler_result, 'quasi_dists'):
-                # Qiskit 1.x 格式
-                quasi_dist = sampler_result.quasi_dists[0]
-                print(f"使用 quasi_dists 格式，分布: {quasi_dist}")
-            elif hasattr(sampler_result, 'metadata'):
-                # Qiskit 2.x 格式
-                print(f"使用 metadata 格式")
-                # 提取测量结果
-                if len(sampler_result.metadata) > 0:
-                    metadata = sampler_result.metadata[0]
-                    print(f"元数据: {metadata}")
-                    
-                    # 尝试获取比特串分布
-                    if 'shots' in metadata:
-                        shots_count = metadata['shots']
-                        print(f"测量次数: {shots_count}")
-                    
-                    # 简化处理：使用第一个比特串作为结果
-                    expectation = 0  # 默认值
-                    
-            else:
-                print(f"采样结果内容: {sampler_result}")
-                # 尝试直接访问结果
-                if hasattr(sampler_result, '__getitem__'):
-                    try:
-                        first_result = sampler_result[0]
-                        print(f"第一个结果: {first_result}")
-                    except:
-                        pass
-            
-            # 创建模拟的结果对象（简化处理）
-            class MockResult:
-                def __init__(self, eigenvalue):
-                    self.eigenvalue = eigenvalue
-                    # 使用基态作为最佳测量（简化处理）
-                    self.best_measurement = {
-                        'state': int_ground_state,
-                        'bitstring': bitstring_ground_state,
-                        'probability': 0.5  # 假设概率
-                    }
-            
-            # 使用基态能量作为特征值（简化处理）
-            ground_state_energy = get_min_energy_bitstring(num_res, num_rot)
-            result = MockResult(complex(ground_state_energy, 0))
-            
-            # 更新追踪器
-            tracker.gs_found = True  # 假设找到了基态
-            tracker.shots_to_ground_state = shots
-            
-            print(f"AWS 执行完成，使用基态比特串: {bitstring_ground_state}")
-            print(f"基态能量: {ground_state_energy}")
-                
-        except Exception as e:
-            print(f"AWS 执行错误: {e}")
-            print("回退到使用本地模拟器结果...")
-            result = local_result
-    else:
-        # 本地后端使用标准 QAOA
-        qaoa = QAOA(
-            sampler=sampler,
-            optimizer=COBYLA(),
-            reps=layers,
-            initial_state=initial_state,
-            mixer=mixer,
-            initial_point=initial_point,
-            callback=tracker.callback,
-            aggregation=alpha,
-        )
-        qaoa.optimizer.set_options(maxiter=10_000)
-        
-        print("Running QAOA optimization...")
+        # 使用量子后端直接优化参数（每次迭代都在量子计算机上执行）
         result = qaoa.compute_minimum_eigenvalue(q_hamiltonian)
         
-        # 收集电路信息
-        try:
-            if hasattr(qaoa, 'ansatz'):
-                circuit = qaoa.ansatz
-                decomposed_circuit = circuit.decompose()
-                
-                # 统计门数量
-                single_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 1)
-                two_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 2)
-                total_gates = single_qubit_gates + two_qubit_gates
-                circuit_depth = decomposed_circuit.depth()
-                
-                # 更新 tracker 中的电路信息
-                for i in range(len(tracker.energy_history)):
-                    tracker.circuit_info['total_gates'].append(total_gates)
-                    tracker.circuit_info['single_qubit_gates'].append(single_qubit_gates)
-                    tracker.circuit_info['two_qubit_gates'].append(two_qubit_gates)
-                    tracker.circuit_info['circuit_depth'].append(circuit_depth)
-        except Exception as e:
-            print(f"收集电路信息时出错: {e}")
+        print(f"\n✓ 量子优化完成！")
+        print(f"最优能量：{result.eigenvalue.real:.6f}")
+        print(f"最优比特串：{result.best_measurement['bitstring']}")
+        print(f"找到基态：{'是' if tracker.gs_found else '否'}")
+        print(f"总迭代次数：{tracker.iterations}")
+        print(f"能量历史长度：{len(tracker.energy_history)}")
+        print(f"时间记录长度：{len(tracker.timing_history)}")
+        
+        # 返回结果和 timing_history，以及迭代信息
+        return result, tracker.timing_history, tracker.iterations, tracker.energy_history
     
+    # 本地后端的处理逻辑保持不变
+    print("在本地模拟器上执行 QAOA 优化...")
+    result = qaoa.compute_minimum_eigenvalue(q_hamiltonian)
+    
+    # 打印调试信息
+    print(f"\n✓ 量子优化完成！")
+    print(f"最优能量：{result.eigenvalue.real:.6f}")
     if hasattr(result, 'best_measurement') and result.best_measurement:
-        if result.best_measurement['state'] == int_ground_state:
-            tracker.gs_found = True
-            tracker.shots_to_ground_state = tracker.num_shots
+        print(f"最优比特串：{result.best_measurement.get('bitstring', 'N/A')}")
+    print(f"找到基态：{'是' if tracker.gs_found else '否'}")
+    print(f"总迭代次数：{tracker.iterations}")
+    print(f"能量历史长度：{len(tracker.energy_history)}")
+    print(f"时间记录长度：{len(tracker.timing_history)}")
     
-    print(f"\n=== QAOA Results ===")
-    print(f"Optimal eigenvalue: {result.eigenvalue.real:.6f}")
-    print(f"Ground state found: {tracker.gs_found}")
-    if tracker.gs_found:
-        print(f"Shots to ground state: {tracker.shots_to_ground_state}")
-    print(f"Iterations: {tracker.iterations}")
-    
-    output_path = create_output_directory(output_dir)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = output_path / f"qaoa_res{num_res}_rot{num_rot}_{timestamp}.csv"
-    
-    result_dict = {
-        "num_res": num_res,
-        "num_rot": num_rot,
-        "alpha": alpha,
-        "shots": shots,
-        "p": layers,
-        "simulator": simulator,
-        "backend": backend,
-        "ground_state": bitstring_ground_state,
-        "gs_found": tracker.gs_found,
-        "iterations": tracker.iterations,
-        "QPU_calls": tracker.shots_to_ground_state if tracker.gs_found else -1,
-        "optimal_eigenvalue": result.eigenvalue.real,
-    }
-    
-    save_csv_result(csv_path, result_dict)
-    print(f"Results saved to: {csv_path}")
-    
-    # 生成 iteration_details.csv 文件
-    iteration_csv_path = output_path / "iteration_details.csv"
-    with open(iteration_csv_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 
-                       'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
-        for idx, energy in enumerate(tracker.energy_history, start=1):
-            trial_idx = 1
-            iteration = idx
-            total_gates = tracker.circuit_info['total_gates'][idx-1] if idx-1 < len(tracker.circuit_info['total_gates']) else 0
-            single_qubit_gates = tracker.circuit_info['single_qubit_gates'][idx-1] if idx-1 < len(tracker.circuit_info['single_qubit_gates']) else 0
-            two_qubit_gates = tracker.circuit_info['two_qubit_gates'][idx-1] if idx-1 < len(tracker.circuit_info['two_qubit_gates']) else 0
-            circuit_depth = tracker.circuit_info['circuit_depth'][idx-1] if idx-1 < len(tracker.circuit_info['circuit_depth']) else 0
-            shots_val = tracker.circuit_info['shots'][idx-1] if idx-1 < len(tracker.circuit_info['shots']) else shots
-            cumulative_shots = tracker.circuit_info['cumulative_shots'][idx-1] if idx-1 < len(tracker.circuit_info['cumulative_shots']) else shots * idx
-            cvar_energy = float(energy)
-            writer.writerow([
-                trial_idx,
-                iteration,
-                backend,
-                total_gates,
-                single_qubit_gates,
-                two_qubit_gates,
-                circuit_depth,
-                shots_val,
-                float(energy),
-                cumulative_shots,
-                cvar_energy
-            ])
-    print(f"Iteration details saved to {iteration_csv_path}")
-    
-    try:
-        iterations_dir = output_path / "iterations"
-        os.makedirs(iterations_dir, exist_ok=True)
-        import json as _json
-        for idx, energy in enumerate(tracker.energy_history, start=1):
-            payload = {
-                "index": idx,
-                "eval_count": idx,
-                "energy": float(energy),
-                "shots": int(shots),
-                "backend": backend,
-                "optimization_convergence": {
-                    "evaluation_counts": list(range(1, idx + 1)),
-                    "energy_values": [float(e) for e in tracker.energy_history[:idx]],
-                    "cumulative_shots": [int(shots) * i for i in range(1, idx + 1)],
-                    "iteration_shots": [int(shots)] * idx
-                },
-                "protein_structure": {
-                    "turn_sequence": [],
-                    "xyz_coordinates": []
-                },
-                "timestamp": datetime.now().isoformat()
-            }
-            with (iterations_dir / f"iteration_{idx}_result.json").open("w", encoding="utf-8") as f:
-                _json.dump(payload, f, indent=2)
-    except Exception:
-        pass
-    
-    if len(tracker.energy_history) > 0:
-        plot_energy_convergence(
-            tracker.iteration_history,
-            tracker.energy_history,
-            num_res,
-            num_rot,
-            layers,
-            output_path
-        )
-    
-    return result_dict
+    # 返回结果和 timing_history，以及迭代信息
+    return result, tracker.timing_history, tracker.iterations, tracker.energy_history
 
 
 def run_simulated_annealing(
@@ -932,10 +856,19 @@ def plot_comparison(
         labels.append(f'Exact\n{exact_energy:.6f}')
     
     if 'qaoa' in results:
-        qaoa_energy = results['qaoa'].get('optimal_eigenvalue', 0)
+        # 处理 SamplingVQEResult 对象
+        qaoa_result = results['qaoa']
+        if hasattr(qaoa_result, 'eigenvalue'):
+            qaoa_energy = float(qaoa_result.eigenvalue.real) if hasattr(qaoa_result.eigenvalue, 'real') else float(qaoa_result.eigenvalue)
+            gs_found = False  # 暂时设为 False，实际值在 tracker 中
+        elif isinstance(qaoa_result, dict):
+            qaoa_energy = qaoa_result.get('optimal_eigenvalue', 0)
+            gs_found = qaoa_result.get('gs_found', False)
+        else:
+            qaoa_energy = 0
+            gs_found = False
         methods.append('QAOA')
         energies.append(qaoa_energy)
-        gs_found = results['qaoa'].get('gs_found', False)
         labels.append(f'QAOA\n{qaoa_energy:.6f}\n(GS found: {gs_found})')
     
     if 'sa' in results:
@@ -1005,10 +938,29 @@ def main():
         results['exact'] = result
     
     if args.method == "qaoa" or args.method == "all":
-        result = run_qaoa(
+        qaoa_result = run_qaoa(
             args.num_res, args.num_rot, args.layers, args.alpha,
             args.shots, args.simulator, str(output_dir), args.backend
         )
+        # 解析返回值
+        if isinstance(qaoa_result, tuple) and len(qaoa_result) == 4:
+            result, timing_history, iterations, energy_history = qaoa_result
+            results['timing_history'] = timing_history
+            results['iterations'] = iterations
+            results['energy_history'] = energy_history
+            print(f"\n[DEBUG] 主函数接收到的数据:")
+            print(f"  - iterations: {iterations}")
+            print(f"  - energy_history 长度：{len(energy_history)}")
+            print(f"  - timing_history 长度：{len(timing_history)}")
+        elif isinstance(qaoa_result, tuple) and len(qaoa_result) == 2:
+            result, timing_history = qaoa_result
+            results['timing_history'] = timing_history
+            results['iterations'] = 0
+            results['energy_history'] = []
+        else:
+            result = qaoa_result
+            results['iterations'] = 0
+            results['energy_history'] = []
         results['qaoa'] = result
     
     if args.method == "sa" or args.method == "all":
@@ -1027,22 +979,97 @@ def main():
         metrics_path = output_dir / "metrics.json"
         qubits_used = int(args.num_res * args.num_rot)
         shots_req = int(args.shots) if (args.method == "qaoa" or args.method == "all") else 0
+        
+        # 从结果中汇总数据
+        qaoa_res = results.get('qaoa', {})
+        
+        # 处理结果对象 - 支持 SamplingVQEResult 和字典两种格式
+        if hasattr(qaoa_res, 'eigenvalue'):
+            # SamplingVQEResult 对象
+            opt_history = getattr(qaoa_res, 'optimization_history', {})
+            
+            # 优先使用 tracker 中记录的实际迭代数和能量历史
+            iterations = results.get('iterations', 0)
+            energy_values = results.get('energy_history', [])
+            
+            print(f"\n[DEBUG] Metrics 生成前的数据:")
+            print(f"  - iterations from results: {iterations}")
+            print(f"  - energy_history from results: {len(energy_values)} items")
+            
+            # 如果 tracker 没有记录，则尝试从 optimization_history 提取
+            if not energy_values and not iterations:
+                if isinstance(opt_history, dict):
+                    energy_values = opt_history.get('values', [])
+                elif hasattr(opt_history, '__len__'):
+                    energy_values = list(opt_history)
+                
+                # 如果 optimization_history 为空，才使用 timing_history 的长度
+                if not energy_values and results.get('timing_history'):
+                    energy_values = [0] * len(results['timing_history'])
+                    iterations = len(results['timing_history'])
+            
+            # 从 results 中提取时间信息（如果有）
+            timing_data = results.get('timing_history', [])
+            total_quantum = sum(t.get('quantum_time', 0.0) for t in timing_data)
+            total_queue = sum(t.get('queue_time', 0.0) for t in timing_data)
+            total_classical = sum(t.get('classical_time', 0.0) for t in timing_data)
+            
+            qaoa_dict = {
+                'iterations': iterations,
+                'optimal_eigenvalue': float(qaoa_res.eigenvalue.real) if hasattr(qaoa_res.eigenvalue, 'real') else float(qaoa_res.eigenvalue),
+                'total_quantum_time': total_quantum,
+                'total_queue_time': total_queue,
+                'total_classical_time': total_classical,
+                'total_gates': 0,
+                'single_qubit_gates': 0,
+                'two_qubit_gates': 0,
+                'circuit_depth': 0,
+                'shots': shots_req
+            }
+        elif isinstance(qaoa_res, dict):
+            qaoa_dict = qaoa_res
+        else:
+            qaoa_dict = {}
+        
+        shots_actual = qaoa_dict.get('shots', 0) * qaoa_dict.get('iterations', 0)
+        
         metrics = {
             "backend": args.backend,
             "shots_requested": shots_req,
-            "shots_actual_total": 0,
-            "iteration_count": 0,
-            "outcome_summary": "",
+            "shots_actual_total": shots_actual,
+            "iteration_count": qaoa_dict.get('iterations', 0),
+            "outcome_summary": str(qaoa_dict.get('optimal_eigenvalue', "")),
             "qubits_used": qubits_used,
             "qubits_full": qubits_used,
-            "transpile_metrics": {},
+            "total_quantum_time": round(qaoa_dict.get('total_quantum_time', 0.0), 3),
+            "total_queue_time": round(qaoa_dict.get('total_queue_time', 0.0), 3),
+            "total_classical_time": round(qaoa_dict.get('total_classical_time', 0.0), 3),
+            "total_gates": qaoa_dict.get('total_gates', 0),
+            "single_qubit_gates": qaoa_dict.get('single_qubit_gates', 0),
+            "two_qubit_gates": qaoa_dict.get('two_qubit_gates', 0),
+            "circuit_depth": qaoa_dict.get('circuit_depth', 0),
+            "transpile_metrics": {
+                "total_gates": qaoa_dict.get('total_gates', 0),
+                "single_qubit_gates": qaoa_dict.get('single_qubit_gates', 0),
+                "two_qubit_gates": qaoa_dict.get('two_qubit_gates', 0),
+                "circuit_depth": qaoa_dict.get('circuit_depth', 0)
+            },
             "convergence_metrics": {}
         }
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
         print(f"Metrics saved to: {metrics_path}")
-    except Exception:
-        pass
+        if qaoa_res:
+            print(f"\n[DONE] Timing Summary:")
+            print(f"  - Total Iterations: {metrics['iteration_count']}")
+            print(f"  - Total Quantum Time: {metrics['total_quantum_time']:.3f}s")
+            print(f"  - Total Queue Time: {metrics['total_queue_time']:.3f}s")
+            print(f"  - Total Classical Time: {metrics['total_classical_time']:.3f}s")
+            # 计算总时间（由 metrics 中的三个部分累加）
+            total_duration = metrics['total_quantum_time'] + metrics['total_queue_time'] + metrics['total_classical_time']
+            print(f"  - Total Execution Time: {total_duration:.3f}s")
+    except Exception as e:
+        print(f"Saving metrics failed: {e}")
 
 
 if __name__ == "__main__":

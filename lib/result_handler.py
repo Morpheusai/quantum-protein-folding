@@ -55,6 +55,9 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from typing import List, Tuple, Dict, Optional
 
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 
 class ResultHandler:
     """通用结果处理类"""

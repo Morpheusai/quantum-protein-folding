@@ -24,6 +24,10 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from qiskit import QuantumCircuit
 
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
 # 添加 QuPepFold 模块到 Python 路径
 qupepfold_path = Path(__file__).parent / "QuPepFold" / "QuPepFold"
 sys.path.insert(0, str(qupepfold_path))
@@ -119,7 +123,7 @@ def create_noise_model(p_single=0.01, p_double=0.05, p_meas=0.03):
             print("正在从本地缓存加载IBM量子硬件噪声模型...")
             with open(noise_model_file, "rb") as f:
                 noise_model = pickle.load(f)
-            print("✓ 成功加载本地缓存的噪声模型")
+            print("[SUCCESS] 成功加载本地缓存的噪声模型")
             return noise_model
         except Exception as e:
             print(f"⚠ 加载本地噪声模型失败: {e}")
@@ -135,7 +139,7 @@ def create_noise_model(p_single=0.01, p_double=0.05, p_meas=0.03):
         backend = service.backend("ibm_fez") 
         
         noise_model = NoiseModel.from_backend(backend)
-        print("✓ 成功获取IBM量子硬件噪声模型")
+        print("[SUCCESS] 成功获取IBM量子硬件噪声模型")
         print(f"  - 后端名称: {backend.name}")
         print(f"  - 噪声模型包含的门: {noise_model.basis_gates}")
         
@@ -143,7 +147,7 @@ def create_noise_model(p_single=0.01, p_double=0.05, p_meas=0.03):
         try:
             with open(noise_model_file, "wb") as f:
                 pickle.dump(noise_model, f)
-            print(f"✓ 噪声模型已保存到本地文件: {noise_model_file}")
+            print(f"[SUCCESS] 噪声模型已保存到本地文件: {noise_model_file}")
         except Exception as e:
             print(f"⚠ 保存噪声模型到本地文件失败: {e}")
             print("  - 后续运行将需要重新从IBM量子硬件获取噪声模型")
@@ -472,6 +476,13 @@ def main():
         two_qubit_gates = sum(1 for op in decomposed_circuit.data if len(op.qubits) == 2)
         circuit_depth = decomposed_circuit.depth()
         
+        iter_time = info.get("time", 0.0)
+        # For local backend, attribute iteration time to (simulated) quantum time
+        if args.backend == "local":
+            q_time, c_time = iter_time, 0.0
+        else:
+            q_time, c_time = 0.0, iter_time
+            
         iteration_details.append({
             'trial_idx': 1,
             'iteration': idx,
@@ -483,7 +494,11 @@ def main():
             'shots': int(args.shots),
             'energy': float(cvar_val),
             'cumulative_shots': int(args.shots) * idx,
-            'cvar_energy': float(cvar_val)
+            'cvar_energy': float(cvar_val),
+            'quantum_time': round(q_time, 3),
+            'queue_time': 0.0,
+            'classical_time': round(c_time, 3),
+            'total_time': round(iter_time, 3)
         })
     
     # 生成 iteration_details.csv 文件
@@ -491,7 +506,7 @@ def main():
     with open(iteration_csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 
-                       'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+                       'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy', 'quantum_time', 'queue_time', 'classical_time', 'total_time'])
         for detail in iteration_details:
             writer.writerow([
                 detail['trial_idx'],
@@ -504,7 +519,11 @@ def main():
                 detail['shots'],
                 detail['energy'],
                 detail['cumulative_shots'],
-                detail['cvar_energy']
+                detail['cvar_energy'],
+                detail['quantum_time'],
+                detail['queue_time'],
+                detail['classical_time'],
+                detail['total_time']
             ])
     print(f"Iteration details saved to {iteration_csv_path}")
 
@@ -549,7 +568,13 @@ def main():
                         "cumulative_shots": [args.shots * i for i in range(1, idx + 1)],
                         "iteration_shots": [args.shots] * idx
                     },
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "timing": {
+                        "quantum_time": round(q_time, 3),
+                        "queue_time": 0.0,
+                        "classical_time": round(c_time, 3),
+                        "total_time": round(iter_time, 3)
+                    }
                 }, f, indent=2)
     except Exception:
         pass
@@ -629,9 +654,21 @@ def main():
     print(f"能量分解图 -> {output_dir / 'most_negative_energy_breakdown.png'}")
 
     metrics_path = output_dir / "metrics.json"
+    last_detail = iteration_details[-1] if iteration_details else {}
+    total_iter_time = sum(info.get("time", 0.0) for info in tries_info)
+    if args.backend == "local":
+        total_q_time, total_c_time = total_iter_time, 0.0
+    else:
+        total_q_time, total_c_time = 0.0, total_iter_time
+
     with open(metrics_path, "w", encoding="utf-8") as f:
         import json
-        transpile_metrics = {}
+        transpile_metrics = {
+            "total_gates": last_detail.get('total_gates'),
+            "single_qubit_gates": last_detail.get('single_qubit_gates'),
+            "two_qubit_gates": last_detail.get('two_qubit_gates'),
+            "circuit_depth": last_detail.get('circuit_depth')
+        }
         convergence_metrics = {}
         json.dump({
             "backend": args.backend,
@@ -641,9 +678,40 @@ def main():
             "outcome_summary": f"cvar_min={float(best_cvar):.6f}",
             "qubits_used": int(num_q_cfg + num_q_int + 1),
             "qubits_full": int(num_q_cfg + num_q_int + 1),
+            "total_quantum_time": round(total_q_time, 3),
+            "total_queue_time": 0.0,
+            "total_classical_time": round(total_c_time, 3),
+            "total_gates": last_detail.get('total_gates'),
+            "single_qubit_gates": last_detail.get('single_qubit_gates'),
+            "two_qubit_gates": last_detail.get('two_qubit_gates'),
+            "circuit_depth": last_detail.get('circuit_depth'),
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }, f, indent=2)
+
+    # Dump timing_summary.json
+    total_iter_time = sum(info.get("time", 0.0) for info in tries_info)
+    if args.backend == "local":
+        total_q_time, total_c_time = total_iter_time, 0.0
+    else:
+        total_q_time, total_c_time = 0.0, total_iter_time
+        
+    timing_summary = {
+        "num_iterations": args.max_optimization_iterations,
+        "total_quantum_time": round(total_q_time, 3),
+        "total_queue_time": 0.0,
+        "total_classical_time": round(total_c_time, 3),
+        "total_time": round(total_iter_time, 3)
+    }
+    timing_path = output_dir / "timing_summary.json"
+    with open(timing_path, "w", encoding="utf-8") as f:
+        json.dump(timing_summary, f, indent=2)
+    print(f"\n[SUCCESS] 时间汇总已保存到: {timing_path}")
+    print(f"  - 总迭代次数: {timing_summary['num_iterations']}")
+    print(f"  - 总量子时间: {timing_summary['total_quantum_time']:.3f}s")
+    print(f"  - 总队列时间: {timing_summary['total_queue_time']:.3f}s")
+    print(f"  - 总经典时间: {timing_summary['total_classical_time']:.3f}s")
+    print(f"  - 总时间: {timing_summary['total_time']:.3f}s")
 
 
 if __name__ == "__main__":

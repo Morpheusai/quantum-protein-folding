@@ -75,7 +75,7 @@ def _get_aws_sim_quantum_sampler() -> tuple[BaseSamplerV2, BackendV2]:
 
     sampler = TranspilingSampler(sampler=aws_sv1_sampler, backend=backend)
 
-    logger.info("Configured with %s shots", IBM_QUANTUM_SHOTS)
+    logger.info("Configured AWS SV1 simulator with %s shots", IBM_QUANTUM_SHOTS)
     logger.info("Circuits will be transpiled automatically before execution")
 
     return sampler, backend

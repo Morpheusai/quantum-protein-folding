@@ -72,15 +72,44 @@ class TranspilingSampler(BaseSamplerV2):
                 circuit: QuantumCircuit = cast(QuantumCircuit, pub)
 
             logger.debug("Transpiling circuit with %s qubits", circuit.num_qubits)
-            
-            # Don't remove final measurements - they are needed for sampling
-            # circuit.remove_final_measurements()
-            
+
+            # Check if the original circuit has measurements
+            original_has_measurements = (
+                circuit.num_clbits > 0 
+            )
+
             transpiled_circuit: QuantumCircuit = transpile(
                 circuit,
                 backend=self._backend,
                 optimization_level=3,
             )
+
+            is_braket_backend = "braket" in str(type(self._backend)).lower()
+
+            if is_braket_backend:
+                # For Braket backends, ensure measurements are only at the end
+                # Remove any intermediate measurements that may have been added during transpilation
+                ops = transpiled_circuit.count_ops()
+                if "measure" in ops:
+                    logger.debug(
+                        "Braket backend: checking for duplicate measurements (count=%d)",
+                        ops.get("measure", 0),
+                    )
+                    # Always remove final measurements and re-add them cleanly
+                    # This prevents the "Cannot measure previously measured qubit" error
+                    try:
+                        transpiled_circuit.remove_final_measurements()
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to remove final measurements: %s. Proceeding with original transpiled circuit.",
+                            e,
+                        )
+                        # If removal fails, use the circuit as-is
+                        pass
+                    else:
+                        # Only add measurements back if we successfully removed them
+                        transpiled_circuit.measure_all(inplace=True)
+
             logger.debug(
                 "Transpiled to %s qubits (%s gates)",
                 transpiled_circuit.num_qubits,

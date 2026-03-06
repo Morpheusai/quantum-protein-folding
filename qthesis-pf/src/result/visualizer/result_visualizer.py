@@ -10,6 +10,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import matplotlib.pyplot as plt
+
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 
 from constants import (
     CONFORMATION_ENCODING,

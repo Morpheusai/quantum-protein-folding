@@ -33,6 +33,12 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if os.name == 'nt':
     os.environ['PYTHONUTF8'] = '1'
     os.environ['PYTHONIOENCODING'] = 'utf-8'
+    # 强制重新配置标准输出以支持 UTF-8 (Python 3.7+)
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
 
 sys.path.insert(0, os.path.join(current_dir, 'src'))
 sys.path.insert(0, os.path.join(current_dir, 'lib'))
@@ -40,6 +46,11 @@ sys.path.insert(0, os.path.join(current_dir, 'lib'))
 # 配置matplotlib和警告设置
 import matplotlib
 matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 warnings.filterwarnings('ignore')
 
 # 导入量子计算相关库
@@ -54,9 +65,8 @@ from qiskit import transpile
 from lib.quantum_backend_manager import QuantumBackendManager
 from lib.protein_folding_builder import ProteinFoldingBuilder
 from lib.result_handler import ResultHandler
-from lib.quantum_optimizer import QuantumOptimizer
-import inspect
-print(f"DEBUG: QuantumOptimizer file: {inspect.getfile(QuantumOptimizer)}")
+from lib.quantum_optimizer import QuantumOptimizer, generate_timing_summary
+
 from lib.job_metadata_logger import JobMetadataLogger
 
 # =============================================================================
@@ -111,8 +121,8 @@ def run_vqe_iteration(qubit_op, ansatz, optimizer, estimator, backend=None, resu
         tuple: (VQE结果, 收敛数据字典)
     """
     return QuantumOptimizer.create_vqe_optimizer(
-        qubit_op, ansatz, optimizer, estimator, backend, args, 
-        result_dir=result_dir, problem=problem, sampler=sampler, trial_idx=trial_idx, iteration_csv_path=iteration_csv_path
+        qubit_op, ansatz, optimizer, estimator, backend,
+        args, result_dir=result_dir, problem=problem, sampler=sampler, trial_idx=trial_idx, iteration_csv_path=iteration_csv_path
     )
 
 
@@ -239,7 +249,7 @@ def main():
     try:
         with open(iteration_csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy', 'quantum_time', 'queue_time', 'classical_time', 'total_time'])
         print(f"✓ 已创建全局迭代记录文件: {iteration_csv_path}")
     except Exception as e:
         print(f"⚠ 创建 CSV 文件失败: {e}")
@@ -255,6 +265,7 @@ def main():
     
     best_overall_energy = float('inf')
     best_restart_idx = -1
+    all_trials_timings = []
 
     for i in range(args.restarts):
         print(f"\n============================================================")
@@ -267,7 +278,7 @@ def main():
         trial_dir = os.path.join(result_dir, f"trial_{i+1}")
         os.makedirs(trial_dir, exist_ok=True)
         
-        raw_result, conv_data = run_vqe_iteration(
+        raw_result, conv_data, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history, trial_timings = run_vqe_iteration(
             qubit_op, base_ansatz, optimizer, 
             backend_info['estimator'], backend_info.get('backend'),
             result_dir=trial_dir, problem=problem, sampler=backend_info.get('sampler_v2'),
@@ -286,6 +297,9 @@ def main():
             best_overall_energy = current_energy
             best_restart_idx = i + 1
             print(f"  ★ 发现新最佳实验: {i+1} (能量: {current_energy:.4f})")
+        
+        if trial_timings:
+            all_trials_timings.append(trial_timings)
 
         # 7.2 收集候选结构 (从 VQE 收敛过程中的 parameters 还原得到)
         # 我们可以选取该轮实验中的最佳点，也可以选取 all_params 中的高质量点
@@ -500,6 +514,29 @@ def main():
 
     print(f"\n✓ 所有任务完成！结果保存在: {result_dir}")
     
+    # 时间汇总 (提前到 metrics 之前)
+    all_timing_flat = []
+    for trial_timing in all_trials_timings:
+        if trial_timing:
+            all_timing_flat.extend(trial_timing)
+    
+    timing_summary = {}
+    if all_timing_flat:
+        timing_summary = generate_timing_summary(all_timing_flat, args.backend)
+        if timing_summary:
+            timing_path = os.path.join(result_dir, "timing_summary.json")
+            try:
+                with open(timing_path, "w", encoding="utf-8") as f:
+                    json.dump(timing_summary, f, indent=2)
+                print(f"\n✓ 时间汇总已保存到: {timing_path}")
+                print(f"  - 总迭代次数: {timing_summary['num_iterations']}")
+                print(f"  - 总量子时间: {timing_summary['total_quantum_time']:.3f}s")
+                print(f"  - 总队列时间: {timing_summary['total_queue_time']:.3f}s")
+                print(f"  - 总经典时间: {timing_summary['total_classical_time']:.3f}s")
+                print(f"  - 总时间: {timing_summary['total_time']:.3f}s")
+            except Exception as e:
+                print(f"⚠ 保存时间汇总失败: {e}")
+
     try:
         metrics_path = os.path.join(result_dir, "metrics.json")
         total_shots = 0
@@ -515,10 +552,13 @@ def main():
             transpiled = transpile(base_ansatz, backend=backend_info.get('backend'), optimization_level=3) if backend_info.get('backend') else base_ansatz
             ops = transpiled.count_ops()
             twoq = int(ops.get('cx', 0)) + int(ops.get('cz', 0)) + int(ops.get('swap', 0))
+            total_gates = sum(ops.values())
             transpile_metrics = {
                 "logical_qubits": int(base_ansatz.num_qubits),
                 "physical_qubits": int(transpiled.num_qubits),
                 "depth": int(transpiled.depth() or 0),
+                "total_gates": total_gates,
+                "single_qubit_gates": total_gates - twoq,
                 "two_qubit_gates": twoq,
                 "ops": {k: int(v) for k, v in ops.items()}
             }
@@ -562,6 +602,13 @@ def main():
             "outcome_summary": f"min_energy={float(best_overall_energy):.6f}",
             "qubits_used": int(base_ansatz.num_qubits),
             "qubits_full": int(problem._qubit_op_full().num_qubits),
+            "total_quantum_time": timing_summary.get("total_quantum_time", 0.0) if timing_summary else 0.0,
+            "total_queue_time": timing_summary.get("total_queue_time", 0.0) if timing_summary else 0.0,
+            "total_classical_time": timing_summary.get("total_classical_time", 0.0) if timing_summary else 0.0,
+            "total_gates": transpile_metrics.get("total_gates", 0) if transpile_metrics else 0,
+            "single_qubit_gates": transpile_metrics.get("single_qubit_gates", 0) if transpile_metrics else 0,
+            "two_qubit_gates": transpile_metrics.get("two_qubit_gates", 0) if transpile_metrics else 0,
+            "circuit_depth": transpile_metrics.get("depth", 0) if transpile_metrics else 0,
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }
@@ -572,7 +619,6 @@ def main():
         pass
     
     return True
-
 
 if __name__ == "__main__":
     success = main()

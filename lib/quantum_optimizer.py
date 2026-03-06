@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-print("HELLO FROM QUANTUM OPTIMIZER")
 """
 量子优化器模块
 
@@ -10,6 +9,7 @@ print("HELLO FROM QUANTUM OPTIMIZER")
 """
 
 import copy
+import time
 from qiskit_algorithms import VQE
 from qiskit_algorithms.optimizers import COBYLA, SPSA, SLSQP
 from qiskit import transpile, QuantumCircuit
@@ -22,6 +22,177 @@ import traceback
 
 from lib.energy_calculator import EnergyCalculator
 from lib.protein_folding_builder import ProteinFoldingBuilder
+
+
+class QuantumTimeTracker:
+    """量子计算时间追踪器 - 区分量子/经典计算时间"""
+
+    def __init__(self):
+        self.submit_time = None
+        self.result_received = None
+        self.iteration_start = None
+        self.iteration_end = None
+        self.quantum_time = 0.0
+        self.queue_time = 0.0
+        self.classical_time = 0.0
+        self.total_time = 0.0
+        self._backend_name = None
+
+    def extract_from_job(self, job, backend_name):
+        """从 job 对象提取时间信息"""
+        self._backend_name = backend_name
+        try:
+            backend_lower = backend_name.lower()
+            if backend_lower.startswith("ibm"):
+                self._extract_ibm_time(job)
+            elif backend_lower.startswith("aws"):
+                self._extract_aws_time(job)
+            else:
+                self._extract_local_time()
+        except Exception as e:
+            print(f"    ⚠ 提取时间信息失败: {e}")
+            self._extract_local_time()
+
+    def _extract_ibm_time(self, job):
+        """从 IBM Quantum job 提取时间"""
+        try:
+            if hasattr(job, "metrics"):
+                metrics = job.metrics()
+                self.quantum_time = float(
+                    metrics.get("usage", {}).get("quantum_seconds", 0.0)
+                )
+                classical_from_ibm = float(
+                    metrics.get("usage", {}).get("classical_seconds", 0.0)
+                )
+                timestamps = metrics.get("timestamps", {})
+                if timestamps:
+                    from datetime import datetime
+
+                    created = timestamps.get("created")
+                    running = timestamps.get("running")
+                    if created and running:
+                        t_created = datetime.fromisoformat(
+                            created.replace("Z", "+00:00")
+                        )
+                        t_running = datetime.fromisoformat(
+                            running.replace("Z", "+00:00")
+                        )
+                        self.queue_time = (t_running - t_created).total_seconds()
+                if (
+                    self.quantum_time == 0.0
+                    and self.submit_time
+                    and self.result_received
+                ):
+                    self.quantum_time = self.result_received - self.submit_time
+            else:
+                self._extract_local_time()
+        except Exception:
+            self._extract_local_time()
+
+    def _extract_aws_time(self, job):
+        """从 AWS Braket job 提取时间"""
+        try:
+            metadata = None
+            if hasattr(job, "metadata"):
+                metadata = job.metadata()
+            elif hasattr(job, "_job") and hasattr(job._job, "metadata"):
+                metadata = job._job.metadata()
+            if metadata:
+                from datetime import datetime
+
+                created = metadata.get("createdAt")
+                started = metadata.get("startedAt")
+                ended = metadata.get("endedAt")
+                if created:
+                    t_created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                if started:
+                    t_started = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                else:
+                    t_started = t_created
+                if ended:
+                    t_ended = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+                else:
+                    t_ended = t_started
+                if started and ended:
+                    self.quantum_time = (t_ended - t_started).total_seconds()
+                if created and started:
+                    self.queue_time = (t_started - t_created).total_seconds()
+            else:
+                self._extract_local_time()
+        except Exception:
+            self._extract_local_time()
+
+    def _extract_local_time(self):
+        """本地模拟器：使用实际测量时间"""
+        if self.submit_time and self.result_received:
+            self.quantum_time = self.result_received - self.submit_time
+        self.queue_time = 0.0
+
+    def finalize(self):
+        """计算最终时间"""
+        if self.iteration_start and self.iteration_end:
+            self.total_time = self.iteration_end - self.iteration_start
+        if self.total_time > 0:
+            self.classical_time = max(
+                0.0, self.total_time - self.quantum_time - self.queue_time
+            )
+
+    def to_dict(self):
+        """输出时间字典"""
+        self.finalize()
+        return {
+            "quantum_time": round(self.quantum_time, 3),
+            "queue_time": round(self.queue_time, 3),
+            "classical_time": round(self.classical_time, 3),
+            "total_time": round(self.total_time, 3),
+        }
+
+
+def generate_timing_summary(all_timings, backend_name):
+    """生成时间汇总报告"""
+    if not all_timings:
+        return None
+    
+    normalized_timings = []
+    for t in all_timings:
+        if isinstance(t, dict):
+            normalized_timings.append(t)
+        elif isinstance(t, (int, float)):
+            normalized_timings.append({
+                "quantum_time": round(t, 3),
+                "queue_time": 0.0,
+                "classical_time": 0.0,
+                "total_time": round(t, 3)
+            })
+        else:
+            normalized_timings.append({
+                "quantum_time": 0.0,
+                "queue_time": 0.0,
+                "classical_time": 0.0,
+                "total_time": 0.0
+            })
+    
+    all_timings = normalized_timings
+    total_quantum = sum(t.get("quantum_time", 0) for t in all_timings)
+    total_queue = sum(t.get("queue_time", 0) for t in all_timings)
+    total_classical = sum(t.get("classical_time", 0) for t in all_timings)
+    total_time = sum(t.get("total_time", 0) for t in all_timings)
+    num_iters = len(all_timings)
+    return {
+        "backend": backend_name,
+        "total_quantum_time": round(total_quantum, 3),
+        "total_queue_time": round(total_queue, 3),
+        "total_classical_time": round(total_classical, 3),
+        "total_time": round(total_time, 3),
+        "num_iterations": num_iters,
+        "average_per_iteration": {
+            "quantum_time": round(total_quantum / max(1, num_iters), 3),
+            "queue_time": round(total_queue / max(1, num_iters), 3),
+            "classical_time": round(total_classical / max(1, num_iters), 3),
+            "total_time": round(total_time / max(1, num_iters), 3),
+        },
+        "per_iteration": all_timings,
+    }
 
 
 class MockQuantumResult:
@@ -150,6 +321,41 @@ class JobResolver:
         except:
             return None
 
+class TimingJobWrapper:
+    """Job 包装类，用于追踪量子任务时间"""
+
+    def __init__(self, base_job, tracker, backend_name, submit_time):
+        self._base_job = base_job
+        self._tracker = tracker
+        self._backend_name = backend_name
+        self._submit_time = submit_time
+        self._result_received_time = None
+
+    def result(self, *args, **kwargs):
+        result = self._base_job.result(*args, **kwargs)
+        self._result_received_time = time.perf_counter()
+
+        timing = QuantumTimeTracker()
+        timing.submit_time = self._submit_time
+        timing.result_received = self._result_received_time
+        timing.iteration_start = self._submit_time
+        timing.iteration_end = self._result_received_time
+        timing.extract_from_job(self._base_job, self._backend_name)
+
+        self._tracker.last_timing = timing.to_dict()
+
+        print(
+            f"    ⏱ 时间分解: 量子={self._tracker.last_timing['quantum_time']:.3f}s, "
+            f"队列={self._tracker.last_timing['queue_time']:.3f}s, "
+            f"经典={self._tracker.last_timing['classical_time']:.3f}s, "
+            f"总计={self._tracker.last_timing['total_time']:.3f}s"
+        )
+
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._base_job, name)
+
 
 class AdaptiveEstimatorV2:
     """EstimatorV2 包装器，支持自适应精度和任务记录"""
@@ -160,10 +366,11 @@ class AdaptiveEstimatorV2:
         self.result_dir = result_dir
         self.call_count = 0
         self.max_iter = getattr(args, 'max_optimization_iterations', 100)
+        self.last_timing = None
+        self._backend_name = getattr(args, 'backend', 'local')
     
     def run(self, pubs, precision=None):
         self.call_count += 1
-        print(f"DEBUG: AdaptiveEstimatorV2.run called count={self.call_count}", flush=True)
         
         label = f"estimator_step_{self.call_count}"
         
@@ -212,10 +419,27 @@ class AdaptiveEstimatorV2:
             else:
                 precision = adaptive_precision
         
+        submit_time = time.perf_counter()
         job = self.base_estimator.run(pubs, precision=precision)
+        
         # 记录 Job ID
         JobRecorder.record_job(job, self.result_dir, label=f"estimator_step_{self.call_count}")
-        return job
+        
+        # 包装 Job 以追踪时间
+        wrapped_job = TimingJobWrapper(job, self, self._backend_name, submit_time)
+        
+        # 对于本地模拟器，job 很快就完成了，我们可以在这里直接设置初始时间信息
+        # 这样即使 result() 还没被调用，至少也有个大概的时间
+        result_received_time = time.perf_counter()
+        timing = QuantumTimeTracker()
+        timing.submit_time = submit_time
+        timing.result_received = result_received_time
+        timing.iteration_start = submit_time
+        timing.iteration_end = result_received_time
+        timing.extract_from_job(job, self._backend_name)
+        self.last_timing = timing.to_dict()
+        
+        return wrapped_job
 
 
 class StructuralLoggingEstimator:
@@ -293,9 +517,11 @@ class QuantumOptimizer:
             'circuit_depth': [],
             'best_params': None,
             'best_energy': float('inf'),
-            'all_params': [] # 用于后续采样候选结构
+            'all_params': [], # 用于后续采样候选结构
+            'iteration_times': []
         }
         actual_shots_list = []
+        _last_callback_time = [time.perf_counter()]
         
         # 迭代结果保存目录
         iteration_result_dir = None
@@ -303,6 +529,21 @@ class QuantumOptimizer:
             iteration_result_dir = os.path.join(result_dir, "iter_all_results")
             os.makedirs(iteration_result_dir, exist_ok=True)
         
+        # 预先创建 Builder 实例，避免在循环中重复创建
+        if problem:
+             # 从 problem 中获取必需的属性
+             # 注意：有的版本的 problem 可能没有 main_chain 属性，需要兼容性处理
+             main_chain = getattr(args, 'main_chain', 'APRLRFY')
+             # 如果 problem 有 build_geometry 方法则直接使用，否则创建专用的 geo_builder
+             from lib.protein_geometry import ProteinGeometryBuilder
+             geo_builder = ProteinGeometryBuilder(main_chain)
+             builder = ProteinFoldingBuilder(main_chain)
+             turn2qubit = builder.get_turn2qubit()
+        else:
+             geo_builder = None
+             builder = None
+             turn2qubit = None
+
         # 内部状态跟踪
         state = {'best_energy': float('inf'), 'best_params': None}
         
@@ -319,9 +560,8 @@ class QuantumOptimizer:
                 actual_shots = shots_per_circuit * num_circuits
             return actual_shots
         
-        print(f"DEBUG: result_dir in create_vqe_optimizer: {result_dir}")
         def callback(eval_count, parameters, mean, std):
-            print(f">>> VQE Callback: count={eval_count}")
+            nonlocal _last_callback_time
             convergence['counts'].append(eval_count)
             convergence['values'].append(mean)
             
@@ -401,12 +641,60 @@ class QuantumOptimizer:
             cumulative_shots = sum(actual_shots_list)
             convergence['cumulative_shots'].append(cumulative_shots)
 
+            current_time = time.perf_counter()
+            if _last_callback_time:
+                iter_time = current_time - _last_callback_time[0]
+                
+                est_timing = None
+                curr_est = state.get('estimator_ref', estimator)
+                while True:
+                    if hasattr(curr_est, 'last_timing') and curr_est.last_timing:
+                        est_timing = curr_est.last_timing
+                        break
+                    if hasattr(curr_est, 'base_estimator'):
+                        curr_est = curr_est.base_estimator
+                    else:
+                        break
+                
+                if est_timing:
+                    q_time = est_timing.get("quantum_time", 0.0)
+                    queue_time = est_timing.get("queue_time", 0.0)
+                    c_time = max(0.0, iter_time - q_time - queue_time)
+                else:
+                    q_time = 0.0
+                    queue_time = 0.0
+                    c_time = iter_time
+
+                timing_info = {
+                    "quantum_time": round(q_time, 3),
+                    "queue_time": round(queue_time, 3),
+                    "classical_time": round(c_time, 3),
+                    "total_time": round(iter_time, 3)
+                }
+                convergence['iteration_times'].append(timing_info)
+                
+                print(
+                    f"    ⏱ 时间分解: 量子={timing_info['quantum_time']:.3f}s, "
+                    f"队列={timing_info['queue_time']:.3f}s, "
+                    f"经典={timing_info['classical_time']:.3f}s, "
+                    f"总计={timing_info['total_time']:.3f}s"
+                )
+            else:
+                timing_info = {
+                    "quantum_time": 0.0,
+                    "queue_time": 0.0,
+                    "classical_time": 0.0,
+                    "total_time": 0.0
+                }
+            _last_callback_time[0] = current_time
+
             # 写入 CSV 记录
             if iteration_csv_path:
                 try:
                     single_q = convergence['single_qubit_gates'][-1]
                     two_q = convergence['two_qubit_gates'][-1]
                     total_gates = single_q + two_q
+                    
                     with open(iteration_csv_path, 'a', newline='') as f:
                         writer = csv.writer(f)
                         writer.writerow([
@@ -420,7 +708,11 @@ class QuantumOptimizer:
                             current_step_shots,
                             float(mean),
                             cumulative_shots,
-                            float(mean)
+                            float(mean),
+                            timing_info.get("quantum_time", 0.0),
+                            timing_info.get("queue_time", 0.0),
+                            timing_info.get("classical_time", 0.0),
+                            timing_info.get("total_time", 0.0)
                         ])
                 except Exception as e:
                     print(f"⚠ 写入 CSV 失败: {e}")
@@ -442,6 +734,12 @@ class QuantumOptimizer:
                         "single_qubit_gates": int(convergence['single_qubit_gates'][-1]),
                         "two_qubit_gates": int(convergence['two_qubit_gates'][-1]),
                         "circuit_depth": int(convergence['circuit_depth'][-1]),
+                        "timing": {
+                            "quantum_time": timing_info.get("quantum_time", 0.0),
+                            "queue_time": timing_info.get("queue_time", 0.0),
+                            "classical_time": timing_info.get("classical_time", 0.0),
+                            "total_time": timing_info.get("total_time", 0.0)
+                        },
                         "protein_structure": protein_info
                     }, f, indent=2)
 
@@ -453,7 +751,6 @@ class QuantumOptimizer:
             protein_info = {}
             try:
                 # 绑定参数到电路
-                # 这里 parameters 已经被保证是完整的 (StructuralLoggingEstimator 的职责)
                 sampling_circuit = working_ansatz.copy()
                 if not sampling_circuit.get_instructions('measure'):
                      sampling_circuit.measure_all()
@@ -476,19 +773,19 @@ class QuantumOptimizer:
                 # 查找最高概率的 bitstring
                 best_bs = max(counts, key=counts.get)
                 
-                # 模拟一个结果供 interpret 使用
-                class MockResultIter:
-                    def __init__(self, bs):
-                        self.eigenstate = {bs: 1.0}
-                        self.eigenvalue = 0.0 # 解析结构不需要真实的能量，只需位串
+                # 使用已经创建好的 geo_builder 和 turn2qubit (来自闭包)
+                # 这样比在每次回调中重新导入并创建实例快得多
+                atoms = geo_builder.build_3d_structure_from_bitstring(best_bs, turn2qubit)
+                xyz = [[atom["name"], atom["coords"][0], atom["coords"][1], atom["coords"][2]] for atom in atoms]
                 
-                raw_iter_res = MockResultIter(best_bs)
-                interpreted = problem.interpret(raw_iter_res)
-                xyz = interpreted.protein_shape_file_gen.get_xyz_data()
+                # 获取转向序列
+                cfg_bits = best_bs[:turn2qubit.count('q')]
+                config = geo_builder._fill_config_bits(cfg_bits, turn2qubit)
+                turns = [int(config[k:k+2], 2) for k in range(0, len(config), 2)]
                 
                 protein_info = {
-                    "turn_sequence": interpreted.turn_sequence if hasattr(interpreted, 'turn_sequence') else "",
-                    "xyz_coordinates": [list(row) for row in xyz] if xyz is not None else [],
+                    "turn_sequence": turns,
+                    "xyz_coordinates": xyz,
                     "best_bitstring": best_bs
                 }
             except Exception as e:
@@ -502,13 +799,12 @@ class QuantumOptimizer:
         # 如果传入的是 COBYLA 实例但 optimizer_name 是其他值，这里其实以外部传入的 optimizer 实例为主
         # 但为了逻辑完整，建议外部调用者在调用此方法前就根据 optimizer_name 创建好 optimizer 实例
         
-        # 最终包装 Estimator，加入自适应精度支持、结构分析支持和 Job 记录
-        final_estimator = estimator
-        if args and hasattr(args, 'adaptive_shots') and args.adaptive_shots:
-            final_estimator = AdaptiveEstimatorV2(final_estimator, args, result_dir=result_dir)
+        # 最终包装 Estimator，加入时间追踪、自适应精度支持、结构分析支持和 Job 记录
+        final_estimator = AdaptiveEstimatorV2(estimator, args, result_dir=result_dir)
         
         # 包装结构解析逻辑
         final_estimator = StructuralLoggingEstimator(final_estimator, structural_callback, result_dir=result_dir)
+        state['estimator_ref'] = final_estimator
 
         # 干跑模式 (Dry-Run)
         if args and hasattr(args, 'dry_run') and args.dry_run:
@@ -546,7 +842,15 @@ class QuantumOptimizer:
                                                        for i in range(1, len(convergence['cumulative_shots']) + 1)]
         
         convergence['label'] = 'VQE Energy'
-        return result, convergence
+        
+        iteration_results = []
+        all_top_energies = []
+        iteration_shots_history = convergence.get('iteration_shots', [])
+        cumulative_shots_history = convergence.get('cumulative_shots', [])
+        all_iteration_timings = convergence.get('iteration_times', [])
+        std_history = convergence.get('stds', [0.0]*len(convergence.get('values', [])))
+        
+        return result, convergence, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history, all_iteration_timings
     
     @staticmethod
     def create_sampler_optimizer(transpiled_circuit, qubit_op, backend, args, result_dir=None, problem=None, sampler_v2=None, trial_idx=1, iteration_csv_path=None):
@@ -572,11 +876,24 @@ class QuantumOptimizer:
         iteration_shots_history = []
         iteration_results = []
         all_top_energies = []
+        all_iteration_timings = []
+        _last_objective_time = [time.perf_counter()]
 
         iteration_result_dir = None
         if result_dir:
             iteration_result_dir = os.path.join(result_dir, "iter_all_results")
             os.makedirs(iteration_result_dir, exist_ok=True)
+            
+        # 预先提取必需的组件。Sampler 模式也执行此操作。
+        from lib.protein_geometry import ProteinGeometryBuilder
+        from lib.precise_energy_calculator import PreciseEnergyCalculator
+        
+        main_chain = args.main_chain
+        p_builder = ProteinFoldingBuilder(main_chain)
+        interaction_matrix = p_builder.get_interaction_matrix()
+        turn2qubit = p_builder.get_turn2qubit()
+        geo_builder = ProteinGeometryBuilder(main_chain)
+        precise_calc = PreciseEnergyCalculator(main_chain, interaction_matrix)
 
         # 干跑模式 (Dry-Run)
         if hasattr(args, 'dry_run') and args.dry_run:
@@ -601,6 +918,12 @@ class QuantumOptimizer:
 
         def objective_function(params):
             """优化目标函数：执行量子电路，使用CVaR策略计算能量"""
+            nonlocal _last_objective_time
+            
+            # 在函数开始时记录迭代开始时间（包含经典处理时间）
+            iter_tracker = QuantumTimeTracker()
+            iter_tracker.iteration_start = time.perf_counter()
+            
             try:
                 # 动态计算 shots
                 current_shots = args.shots
@@ -637,11 +960,7 @@ class QuantumOptimizer:
                                 # 跳过提交，直接处理恢复的结果
                                 actual_shots = sum(counts.values())
                                 
-                                # 使用精确能量计算
-                                builder = ProteinFoldingBuilder(args.main_chain)
-                                interaction_matrix = builder.get_interaction_matrix()
-                                turn2qubit = builder.get_turn2qubit()
-                                
+                                # 使用已提取的 precise_calc 替代重复创建
                                 energy = EnergyCalculator.calculate_cvar_energy_precise(
                                     counts, args.main_chain, interaction_matrix, turn2qubit, args.alpha
                                 )
@@ -649,7 +968,7 @@ class QuantumOptimizer:
                                 top_results = EnergyCalculator.extract_top_results_precise(
                                     counts, args.main_chain, interaction_matrix, turn2qubit, args.max_results
                                 )
-                                top_energies = [result[1] for result in top_results]
+                                top_energies = [res_t[1] for res_t in top_results]
                                 convergence_history.append(energy)
                                 if not hasattr(objective_function, 'std_history'):
                                     objective_function.std_history = []
@@ -677,7 +996,40 @@ class QuantumOptimizer:
                 # 记录 Job ID
                 JobRecorder.record_job(job, result_dir, label=label)
                 
+                # 设置提交时间（在量子任务提交后）
+                iter_tracker.submit_time = time.perf_counter()
+                
                 result = job.result()
+                
+                iter_tracker.result_received = time.perf_counter()
+                iter_tracker.iteration_end = iter_tracker.result_received
+                iter_tracker.extract_from_job(job, getattr(args, 'backend', 'local'))
+                
+                timing_info = iter_tracker.to_dict()
+                all_iteration_timings.append(timing_info)
+
+                current_time = time.perf_counter()
+                if _last_objective_time:
+                    iter_time = current_time - _last_objective_time[0]
+                    
+                    q_time = iter_tracker.quantum_time
+                    queue_time = iter_tracker.queue_time
+                    c_time = max(0.0, iter_time - q_time - queue_time)
+                    
+                    timing_info = {
+                        "quantum_time": round(q_time, 3),
+                        "queue_time": round(queue_time, 3),
+                        "classical_time": round(c_time, 3),
+                        "total_time": round(iter_time, 3)
+                    }
+                    print(
+                        f"    ⏱ 时间分解: 量子={timing_info['quantum_time']:.3f}s, "
+                        f"队列={timing_info['queue_time']:.3f}s, "
+                        f"经典={timing_info['classical_time']:.3f}s, "
+                        f"总计={timing_info['total_time']:.3f}s"
+                    )
+                _last_objective_time[0] = current_time
+                
                 if sampler_v2:
                     result = result[0]
                     # 获取计数 (兼容 standard measure_all 产生的 'meas' 名)
@@ -688,11 +1040,7 @@ class QuantumOptimizer:
                 
                 actual_shots = sum(counts.values())
                 
-                # 使用精确能量计算
-                builder = ProteinFoldingBuilder(args.main_chain)
-                interaction_matrix = builder.get_interaction_matrix()
-                turn2qubit = builder.get_turn2qubit()
-                
+                # 使用外部 precise_calc 进行优化后的能量计算
                 energy = EnergyCalculator.calculate_cvar_energy_precise(
                     counts, args.main_chain, interaction_matrix, turn2qubit, args.alpha
                 )
@@ -701,7 +1049,7 @@ class QuantumOptimizer:
                 top_results = EnergyCalculator.extract_top_results_precise(
                     counts, args.main_chain, interaction_matrix, turn2qubit, args.max_results
                 )
-                top_energies = [result[1] for result in top_results]
+                top_energies = [res_t[1] for res_t in top_results]
                 
                 convergence_history.append(energy)
                 # 临时存储 std，后续需要添加到 iteration_results 或 convergence_history 中 
@@ -763,7 +1111,8 @@ class QuantumOptimizer:
                     "single_qubit_gates": single_qubit_gates,
                     "two_qubit_gates": two_qubit_gates,
                     "circuit_depth": circuit_depth,
-                    "raw_counts": counts
+                    "raw_counts": counts,
+                    "timing": timing_info if 'timing_info' in dir() else {}
                 }
                 iteration_results.append(iteration_data)
                 
@@ -786,7 +1135,11 @@ class QuantumOptimizer:
                                 iteration_data.get("actual_shots", 0),
                                 iteration_data.get("cvar_energy", 0),
                                 cumulative_shots_history[-1] if cumulative_shots_history else 0,
-                                iteration_data.get("cvar_energy", 0)
+                                iteration_data.get("cvar_energy", 0),
+                                iteration_data.get("timing", {}).get("quantum_time", 0.0),
+                                iteration_data.get("timing", {}).get("queue_time", 0.0),
+                                iteration_data.get("timing", {}).get("classical_time", 0.0),
+                                iteration_data.get("timing", {}).get("total_time", 0.0)
                             ])
                     except Exception as e:
                         print(f"⚠ 写入 CSV 失败: {e}")
@@ -796,15 +1149,9 @@ class QuantumOptimizer:
                     top_results_for_struct = iteration_data.get("top_results", [])
                     
                     if top_results_for_struct:
-                        best_bitstring, best_energy, best_count = top_results_for_struct[0]
+                        best_bitstring, best_energy_val, best_count = top_results_for_struct[0]
                         
-                        # 使用精确 3D 结构生成
-                        from lib.protein_geometry import ProteinGeometryBuilder
-                        
-                        builder = ProteinFoldingBuilder(args.main_chain)
-                        turn2qubit = builder.get_turn2qubit()
-                        
-                        geo_builder = ProteinGeometryBuilder(args.main_chain)
+                        # 使用已创建的 geo_builder 和 turn2qubit 提取结构
                         atoms = geo_builder.build_3d_structure_from_bitstring(best_bitstring, turn2qubit)
                         
                         # 生成 XYZ 数据
@@ -824,6 +1171,7 @@ class QuantumOptimizer:
                     
                     iteration_result_path = os.path.join(iteration_result_dir, f'iteration_{len(convergence_history)}_result.json')
                     with open(iteration_result_path, 'w') as f:
+                        _iter_timing = iteration_data.get("timing", {})
                         serializable_data = {
                             "iteration": iteration_data["iteration"],
                             "cvar_energy": iteration_data["cvar_energy"],
@@ -834,6 +1182,12 @@ class QuantumOptimizer:
                             "single_qubit_gates": int(iteration_data.get("single_qubit_gates", 0)),
                             "two_qubit_gates": int(iteration_data.get("two_qubit_gates", 0)),
                             "circuit_depth": int(iteration_data.get("circuit_depth", 0)),
+                            "timing": {
+                                "quantum_time": _iter_timing.get("quantum_time", 0.0),
+                                "queue_time": _iter_timing.get("queue_time", 0.0),
+                                "classical_time": _iter_timing.get("classical_time", 0.0),
+                                "total_time": _iter_timing.get("total_time", 0.0)
+                            },
                             "protein_structure": protein_structure_info
                         }
                         json.dump(serializable_data, f, indent=2)
@@ -946,6 +1300,6 @@ class QuantumOptimizer:
         
         # 从 objective_function 中提取 std_history
         std_history = getattr(objective_function, 'std_history', [0.0]*len(convergence_history))
-        return res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history
+        return res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history, all_iteration_timings
         
 

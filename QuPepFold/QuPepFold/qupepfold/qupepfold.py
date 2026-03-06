@@ -1,8 +1,13 @@
 import os
 import math
 import csv
+import time
 import numpy as np
 import matplotlib.pyplot as plt
+
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 from typing import Dict, Tuple, List
 from scipy.optimize import minimize
 
@@ -21,6 +26,44 @@ MAX_EVALS_PER_TRY    = 80        # per-iteration budget for Nelder–Mead (we do
 EXPORT_P_MIN_DEFAULT = 0.02
 RNG_SEED             = 29507
 BACKEND_DEAULT       = "qiskit_aer"
+USE_GPU_DEFAULT      = False
+
+# ======================================================================================
+# GPU Support utilities
+# ======================================================================================
+def check_gpu_available() -> bool:
+    """Check if GPU (CUDA) is available for Aer simulation."""
+    try:
+        sim = AerSimulator(method='statevector_gpu')
+        # Try a simple circuit to verify GPU works
+        from qiskit import QuantumCircuit as QC
+        test_qc = QC(1)
+        test_qc.h(0)
+        test_qc.save_statevector()
+        result = sim.run(test_qc).result()
+        return result.success
+    except Exception:
+        return False
+
+def get_simulator(use_gpu: bool = False) -> AerSimulator:
+    """Get appropriate AerSimulator based on GPU preference.
+    
+    Args:
+        use_gpu: If True, attempt to use GPU-accelerated simulation.
+        
+    Returns:
+        AerSimulator configured for CPU or GPU execution.
+    """
+    if use_gpu:
+        try:
+            sim = AerSimulator(method='statevector_gpu', device='GPU')
+            print("[GPU] Using CUDA-accelerated statevector simulation")
+            return sim
+        except Exception as e:
+            print(f"[GPU] GPU not available, falling back to CPU: {e}")
+            return AerSimulator(method='statevector')
+    else:
+        return AerSimulator(method='statevector')
 
 # Geometry (Å; degrees→radians)
 _BOND = {"C-N": 1.329, "N-CA": 1.458, "CA-C": 1.525, "C=O": 1.229}
@@ -88,10 +131,16 @@ def read_cli_inputs():
     except Exception:
         backend_mode = "aer_sim"
 
+    use_gpu_s = ask("Use GPU acceleration? [y/N]: ", "N")
+    use_gpu = use_gpu_s.strip().lower() == 'y'
+    if use_gpu and not check_gpu_available():
+        print("[Warning] GPU requested but not available, falling back to CPU")
+        use_gpu = False
+
     output_dir = ask("Enter output directory [default './results']: ", "./results")
     os.makedirs(output_dir, exist_ok=True)
 
-    return protein_sequence, max_iterations, num_shots, export_p, cvar_alpha, backend_mode, output_dir
+    return protein_sequence, max_iterations, num_shots, export_p, cvar_alpha, backend_mode, use_gpu, output_dir
 
 # ======================================================================================
 # Config mapping & interactions
@@ -260,12 +309,27 @@ def build_scalable_ansatz(parameters: np.ndarray, hyper: Dict, measure: bool = F
         qc.measure(range(qc.num_qubits), range(qc.num_clbits))
     return qc
 
-def statevector_fold_probs(qc: QuantumCircuit, hyper: Dict) -> Dict[str, float]:
-    """Exact probabilities for measured qubits (cfg+int), ancilla excluded."""
-    sv = Statevector.from_instruction(qc)
-    probs = np.abs(sv.data) ** 2
+def statevector_fold_probs(qc: QuantumCircuit, hyper: Dict, use_gpu: bool = False) -> Dict[str, float]:
+    """Exact probabilities for measured qubits (cfg+int), ancilla excluded.
+    
+    Args:
+        qc: Quantum circuit to simulate.
+        hyper: Hyperparameters dictionary.
+        use_gpu: If True, use GPU-accelerated simulation.
+        
+    Returns:
+        Dictionary mapping bitstrings to probabilities.
+    """
     Q = qc.num_qubits
     _, _, _, _, measured_idx = qubit_layout(hyper)
+    
+    if use_gpu:
+        # GPU-accelerated simulation via AerSimulator
+        probs = _statevector_probs_gpu(qc)
+    else:
+        # CPU simulation via Statevector
+        sv = Statevector.from_instruction(qc)
+        probs = np.abs(sv.data) ** 2
 
     out: Dict[str, float] = {}
     for i, p in enumerate(probs):
@@ -274,12 +338,34 @@ def statevector_fold_probs(qc: QuantumCircuit, hyper: Dict) -> Dict[str, float]:
         out[fold] = out.get(fold, 0.0) + float(p)
     return out
 
+def _statevector_probs_gpu(qc: QuantumCircuit) -> np.ndarray:
+    """Compute statevector probabilities using GPU-accelerated AerSimulator."""
+    # Create a copy with save_statevector instruction
+    qc_sv = qc.copy()
+    qc_sv.save_statevector()
+    
+    sim = get_simulator(use_gpu=True)
+    result = sim.run(qc_sv).result()
+    sv = result.get_statevector()
+    return np.abs(np.asarray(sv.data)) ** 2
+
 # ======================================================================================
 # CVaR objective + multi-start optimizer (console updates)
 # ======================================================================================
-def cvar_objective(parameters: np.ndarray, hyper: Dict, alpha: float) -> float:
+def cvar_objective(parameters: np.ndarray, hyper: Dict, alpha: float, use_gpu: bool = False) -> float:
+    """Compute CVaR objective for given parameters.
+    
+    Args:
+        parameters: Variational parameters for the ansatz.
+        hyper: Hyperparameters dictionary.
+        alpha: CVaR tail mass parameter.
+        use_gpu: If True, use GPU-accelerated simulation.
+        
+    Returns:
+        CVaR energy value.
+    """
     qc = build_scalable_ansatz(parameters, hyper, measure=False)
-    probs = statevector_fold_probs(qc, hyper)
+    probs = statevector_fold_probs(qc, hyper, use_gpu=use_gpu)
     states = list(probs.keys())
     pvals  = np.array([probs[s] for s in states], float)
     energies = np.array(exact_hamiltonian(states, hyper), float)
@@ -291,20 +377,36 @@ def cvar_objective(parameters: np.ndarray, hyper: Dict, alpha: float) -> float:
     tail = pvals[:k].tolist(); tail.append(alpha - sum(tail))
     return float(np.dot(tail, energies[:k+1]) / alpha)
 
-def optimize_cvar_multistart(hyper: Dict, max_iterations: int, alpha: float):
-    """Run many small-budget optimizations and log CVaR; print progress per try."""
+def optimize_cvar_multistart(hyper: Dict, max_iterations: int, alpha: float, use_gpu: bool = False):
+    """Run many small-budget optimizations and log CVaR; print progress per try.
+    
+    Args:
+        hyper: Hyperparameters dictionary.
+        max_iterations: Number of multi-start optimization attempts.
+        alpha: CVaR tail mass parameter.
+        use_gpu: If True, use GPU-accelerated simulation.
+        
+    Returns:
+        Tuple of (best_parameters, best_cvar_energy, trace_list).
+    """
     rng = np.random.default_rng(RNG_SEED)
     D = num_angles_for_ansatz(hyper)
     best_x, best_f = None, float("inf")
     trace = []
     tries_info: List[Dict] = []
+    
+    device_str = "GPU" if use_gpu else "CPU"
+    print(f"[Optimization] Running on {device_str}")
+    
     for i in range(max_iterations):
         x0 = rng.uniform(-np.pi, np.pi, size=D)
-        f = lambda x: cvar_objective(x, hyper, alpha)
+        start_time = time.perf_counter()
+        f = lambda x: cvar_objective(x, hyper, alpha, use_gpu=use_gpu)
         res = minimize(f, x0, method="Nelder-Mead",
                        options={"maxfev": MAX_EVALS_PER_TRY, "xatol":1e-3, "fatol":1e-3})
+        iter_time = time.perf_counter() - start_time
         trace.append(res.fun)
-        tries_info.append({"x": np.asarray(res.x, float).tolist(), "fun": float(res.fun)})
+        tries_info.append({"x": np.asarray(res.x, float).tolist(), "fun": float(res.fun), "time": iter_time})
         if res.fun < best_f:
             best_f, best_x = res.fun, res.x
         pct = (i+1)*100.0/max_iterations
@@ -568,7 +670,7 @@ def plot_energy_breakdown_for_most_negative(probs: Dict[str, float], hyper: Dict
 # ======================================================================================
 def main():
     # === Prompts/inputs (UX parity) ===
-    seq, max_iterations, num_shots, export_p, cvar_alpha, backend_mode, out_dir = read_cli_inputs()
+    seq, max_iterations, num_shots, export_p, cvar_alpha, backend_mode, use_gpu, out_dir = read_cli_inputs()
 
     # === Mapping & hyper ===
     turn2qubit, fixed_bits, variable_bits = generate_turn2qubit(seq)
@@ -591,7 +693,7 @@ def main():
 
     # === Multi-start CVaR optimization with per-iteration prints ===
     print(f"[CVaR-VQE] alpha={cvar_alpha}, tries={max_iterations}, per-try budget={MAX_EVALS_PER_TRY}")
-    best_x, best_cvar, cvar_trace = optimize_cvar_multistart(hyper, max_iterations, cvar_alpha)
+    best_x, best_cvar, cvar_trace, _ = optimize_cvar_multistart(hyper, max_iterations, cvar_alpha, use_gpu=use_gpu)
     print(f"Minimum CVaR Energy: {best_cvar:.6f}")
 
     # === Save text summary ===
@@ -620,7 +722,7 @@ Minimum CVaR Energy: {best_cvar:.6f}
         print("Circuit drawing failed:", e)
 
     # === Final optimized distribution (statevector) ===
-    probs = statevector_fold_probs(build_scalable_ansatz(best_x, hyper, measure=False), hyper)
+    probs = statevector_fold_probs(build_scalable_ansatz(best_x, hyper, measure=False), hyper, use_gpu=use_gpu)
     states = list(probs.keys())
     pvals  = np.array([probs[s] for s in states], float)
 
@@ -635,9 +737,9 @@ Minimum CVaR Energy: {best_cvar:.6f}
         elif backend_mode == 'aws_garnet':
             provider = BraketProvider()                                                                                                                                     
             backend = provider.get_backend('Garnet')
-        elif backend_mode == 'aws_fo':
-            provider = BraketProvider()                                                                                                                                     
-            backend = provider.get_backend('Garnet')
+        elif backend_mode == 'aws_forte':
+            provider = BraketProvider()                                                                                                                                                                             
+            backend = provider.get_backend('Forte')
         _ = backend.run(transpile(qc_meas, backend), shots=num_shots).result().get_counts()
     except Exception as e:
         print("Aer sampling skipped (simulator error):", e)

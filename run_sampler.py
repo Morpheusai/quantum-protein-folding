@@ -25,6 +25,7 @@ import sys
 import warnings
 import json
 import csv
+import time
 import numpy as np
 
 # 设置Python环境编码
@@ -32,6 +33,12 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if os.name == 'nt':
     os.environ['PYTHONUTF8'] = '1'
     os.environ['PYTHONIOENCODING'] = 'utf-8'
+    # 强制重新配置标准输出以支持 UTF-8 (Python 3.7+)
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
 
 # 添加项目路径
 sys.path.insert(0, os.path.join(current_dir, 'src'))
@@ -40,6 +47,11 @@ sys.path.insert(0, os.path.join(current_dir, 'lib'))
 # 配置matplotlib为非交互模式
 import matplotlib
 matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 warnings.filterwarnings('ignore')
 
 # 导入量子计算相关库
@@ -52,7 +64,7 @@ from lib.quantum_backend_manager import QuantumBackendManager
 from lib.energy_calculator import EnergyCalculator
 from lib.protein_folding_builder import ProteinFoldingBuilder
 from lib.result_handler import ResultHandler
-from lib.quantum_optimizer import QuantumOptimizer, MockQuantumResult
+from lib.quantum_optimizer import QuantumOptimizer, MockQuantumResult, generate_timing_summary
 from lib.job_metadata_logger import JobMetadataLogger
 
 # =============================================================================
@@ -232,6 +244,7 @@ def main():
     all_conv_data = []
     all_trials_iteration_shots = []
     all_trials_cumulative_shots = []
+    all_trials_timings = []
     
     # =============================================================================
     # 3.6 执行CVaR优化
@@ -245,14 +258,14 @@ def main():
     try:
         with open(iteration_csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy'])
+            writer.writerow(['trial_idx', 'iteration', 'backend', 'total_gates', 'single_qubit_gates', 'two_qubit_gates', 'circuit_depth', 'shots', 'energy', 'cumulative_shots', 'cvar_energy', 'quantum_time', 'queue_time', 'classical_time', 'total_time'])
         print(f"✓ 已创建全局迭代记录文件: {iteration_csv_path}")
     except Exception as e:
         print(f"⚠ 创建 CSV 文件失败: {e}")
         iteration_csv_path = None
     
     # 全局候选池，用于结构去重
-    global_candidates = [] # 存储 (bitstring, energy, count) 形式的元组
+    global_candidates = []  # 存储 (bitstring, energy, count) 形式的元组
     
     for i in range(args.restarts):
         trial_idx = i + 1
@@ -278,8 +291,9 @@ def main():
                 trial_idx=trial_idx, iteration_csv_path=iteration_csv_path
             )
             
-            # 结果解包: res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history
-            res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history = results_tuple
+            # 结果解包: res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history, all_iteration_timings
+            res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history, trial_timings = results_tuple
+            all_trials_timings.append(trial_timings)
             # 汇总跨试验的 shots 信息
             if isinstance(iteration_shots_history, list) and len(iteration_shots_history) > 0:
                 all_trials_iteration_shots.append(iteration_shots_history)
@@ -321,7 +335,7 @@ def main():
     print(f"=============================================================================")
     
     # 解包最佳结果供后续收敛图使用
-    res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history = best_results_tuple
+    res, convergence_history, std_history, iteration_results, all_top_energies, cumulative_shots_history, iteration_shots_history, best_timings = best_results_tuple
     
     all_conv_data = []
     
@@ -567,8 +581,32 @@ def main():
     # =============================================================================
     # 3.11 任务完成
     # =============================================================================
+    
     print(f"\n✓ 所有任务完成！结果保存在: {result_dir}")
     try:
+        # 时间汇总 (提前到 metrics 之前)
+        all_timing_flat = []
+        for trial_timing in all_trials_timings:
+            if trial_timing:
+                all_timing_flat.extend(trial_timing)
+        
+        timing_summary = {}
+        if all_timing_flat:
+            timing_summary = generate_timing_summary(all_timing_flat, args.backend)
+            if timing_summary:
+                timing_path = os.path.join(result_dir, "timing_summary.json")
+                try:
+                    with open(timing_path, "w", encoding="utf-8") as f:
+                        json.dump(timing_summary, f, indent=2)
+                    print(f"✓ 时间汇总已保存到: {timing_path}")
+                    print(f"  - 总迭代次数: {timing_summary['num_iterations']}")
+                    print(f"  - 总量子时间: {timing_summary['total_quantum_time']:.3f}s")
+                    print(f"  - 总队列时间: {timing_summary['total_queue_time']:.3f}s")
+                    print(f"  - 总经典时间: {timing_summary['total_classical_time']:.3f}s")
+                    print(f"  - 总时间: {timing_summary['total_time']:.3f}s")
+                except Exception as e:
+                    print(f"⚠ 保存时间汇总失败: {e}")
+
         metrics_path = os.path.join(result_dir, "metrics.json")
         total_shots = 0
         total_iters = 0
@@ -582,10 +620,13 @@ def main():
         try:
             ops = transpiled_circuit.count_ops()
             twoq = int(ops.get('cx', 0)) + int(ops.get('cz', 0)) + int(ops.get('swap', 0))
+            total_gates = sum(ops.values())
             transpile_metrics = {
                 "logical_qubits": int(ansatz.num_qubits),
                 "physical_qubits": int(transpiled_circuit.num_qubits),
                 "depth": int(transpiled_circuit.depth() or 0),
+                "total_gates": total_gates,
+                "single_qubit_gates": total_gates - twoq,
                 "two_qubit_gates": twoq,
                 "ops": {k: int(v) for k, v in ops.items()}
             }
@@ -614,6 +655,13 @@ def main():
             "outcome_summary": f"min_energy={float(best_energy):.6f}",
             "qubits_used": int(ansatz.num_qubits),
             "qubits_full": int(problem._qubit_op_full().num_qubits),
+            "total_quantum_time": timing_summary.get("total_quantum_time", 0.0) if timing_summary else 0.0,
+            "total_queue_time": timing_summary.get("total_queue_time", 0.0) if timing_summary else 0.0,
+            "total_classical_time": timing_summary.get("total_classical_time", 0.0) if timing_summary else 0.0,
+            "total_gates": transpile_metrics.get("total_gates", 0) if transpile_metrics else 0,
+            "single_qubit_gates": transpile_metrics.get("single_qubit_gates", 0) if transpile_metrics else 0,
+            "two_qubit_gates": transpile_metrics.get("two_qubit_gates", 0) if transpile_metrics else 0,
+            "circuit_depth": transpile_metrics.get("depth", 0) if transpile_metrics else 0,
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }
@@ -623,6 +671,12 @@ def main():
     except Exception:
         pass
 
+    return True
 
 if __name__ == "__main__":
-    main()
+    success = main()
+    if success:
+        print("\n🎉 蛋白质折叠模拟运行成功！")
+    else:
+        print("\n❌ 蛋白质折叠模拟运行失败。")
+        sys.exit(1)

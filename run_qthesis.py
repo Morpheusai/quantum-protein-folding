@@ -27,6 +27,11 @@ import json
 import csv
 from pathlib import Path
 from typing import TYPE_CHECKING
+import matplotlib.pyplot as plt
+
+# 设置中文字体支持
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 
 if TYPE_CHECKING:
     from qiskit_algorithms import SamplingMinimumEigensolverResult
@@ -333,7 +338,7 @@ def main() -> None:
     iteration_csv_path = Path(constants.RESULTS_DATA_DIRPATH) / "iteration_details.csv"
     
     with open(iteration_csv_path, 'w', encoding='utf-8') as f:
-        f.write('trial_idx,iteration,backend,total_gates,single_qubit_gates,two_qubit_gates,circuit_depth,shots,energy,cumulative_shots,cvar_energy\n')
+        f.write('trial_idx,iteration,backend,total_gates,single_qubit_gates,two_qubit_gates,circuit_depth,shots,energy,cumulative_shots,cvar_energy,quantum_time,queue_time,classical_time,total_time\n')
         for i in range(len(counts)):
             trial_idx = 1
             iteration = i + 1
@@ -346,7 +351,14 @@ def main() -> None:
             energy = values[i] if i < len(values) else 0
             cumulative_shots = circuit_info['cumulative_shots'][i] if i < len(circuit_info['cumulative_shots']) else 0
             cvar_energy = energy
-            f.write(f'{trial_idx},{iteration},{backend},{total_gates},{single_qubit_gates},{two_qubit_gates},{circuit_depth},{shots},{energy},{cumulative_shots},{cvar_energy}\n')
+            
+            timing_entry = circuit_info.get('timing', [])[i] if 'timing' in circuit_info and i < len(circuit_info['timing']) else {}
+            quantum_time = timing_entry.get('quantum_time', 0.0)
+            queue_time = timing_entry.get('queue_time', 0.0)
+            classical_time = timing_entry.get('classical_time', 0.0)
+            total_time = timing_entry.get('total_time', 0.0)
+            
+            f.write(f'{trial_idx},{iteration},{backend},{total_gates},{single_qubit_gates},{two_qubit_gates},{circuit_depth},{shots},{energy},{cumulative_shots},{cvar_energy},{quantum_time},{queue_time},{classical_time},{total_time}\n')
     
     logger.info(f"Iteration details saved to {iteration_csv_path}")
     try:
@@ -372,6 +384,8 @@ def main() -> None:
         for idx, (iter_count, energy) in enumerate(zip(counts, values)):
             cumulative_shots = [int(args.shots) * i for i in range(1, idx + 2)]
             iteration_shots = [int(args.shots)] * (idx + 1)
+            timing_entry = circuit_info.get('timing', [])[idx] if 'timing' in circuit_info and idx < len(circuit_info['timing']) else {}
+            
             payload = {
                 "index": idx + 1,
                 "eval_count": int(iter_count),
@@ -390,7 +404,8 @@ def main() -> None:
                     "turn_sequence": turns,
                     "xyz_coordinates": xyz_data
                 },
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "timing": timing_entry
             }
             with (iter_dir / f"iteration_{idx + 1}_result.json").open("w", encoding="utf-8") as f:
                 import json as _json
@@ -410,7 +425,41 @@ def main() -> None:
         import json
         import constants
         metrics_path = Path(constants.RESULTS_DATA_DIRPATH) / "metrics.json"
-        transpile_metrics = {}
+        
+        # Get gate counts if available from circuit_info
+        total_gates = 0
+        single_qubit_gates = 0
+        two_qubit_gates = 0
+        circuit_depth = 0
+        if 'total_gates' in circuit_info:
+            tg = circuit_info.get('total_gates', [])
+            total_gates = tg[-1] if isinstance(tg, list) and tg else (tg if not isinstance(tg, list) else 0)
+            sg = circuit_info.get('single_qubit_gates', [])
+            single_qubit_gates = sg[-1] if isinstance(sg, list) and sg else (sg if not isinstance(sg, list) else 0)
+            twg = circuit_info.get('two_qubit_gates', [])
+            two_qubit_gates = twg[-1] if isinstance(twg, list) and twg else (twg if not isinstance(twg, list) else 0)
+            cd = circuit_info.get('circuit_depth', [])
+            circuit_depth = cd[-1] if isinstance(cd, list) and cd else (cd if not isinstance(cd, list) else 0)
+            
+        transpile_metrics = {
+            "total_gates": total_gates,
+            "single_qubit_gates": single_qubit_gates,
+            "two_qubit_gates": two_qubit_gates,
+            "circuit_depth": circuit_depth
+        }
+        
+        # Get timing sum
+        total_q_time = 0.0
+        total_queue_time = 0.0
+        total_c_time = 0.0
+        total_time = 0.0
+        if 'timing' in circuit_info and circuit_info['timing']:
+            timings = circuit_info['timing']
+            total_q_time = sum(t.get("quantum_time", 0.0) for t in timings)
+            total_queue_time = sum(t.get("queue_time", 0.0) for t in timings)
+            total_c_time = sum(t.get("classical_time", 0.0) for t in timings)
+            total_time = sum(t.get("total_time", 0.0) for t in timings)
+
         convergence_metrics = {}
         metrics = {
             "backend": args.backend,
@@ -420,11 +469,44 @@ def main() -> None:
             "outcome_summary": f"min_energy={float(min(values)):.6f}" if isinstance(values, list) and len(values) > 0 else "",
             "qubits_used": int(compressed_h.num_qubits),
             "qubits_full": int(original_h.num_qubits),
+            "total_quantum_time": round(total_q_time, 3),
+            "total_queue_time": round(total_queue_time, 3),
+            "total_classical_time": round(total_c_time, 3),
+            "total_gates": total_gates,
+            "single_qubit_gates": single_qubit_gates,
+            "two_qubit_gates": two_qubit_gates,
+            "circuit_depth": circuit_depth,
             "transpile_metrics": transpile_metrics,
             "convergence_metrics": convergence_metrics
         }
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
+            
+        if 'timing' in circuit_info and circuit_info['timing']:
+            timings = circuit_info['timing']
+            quantum_time = sum(t.get("quantum_time", 0.0) for t in timings)
+            queue_time = sum(t.get("queue_time", 0.0) for t in timings)
+            classical_time = sum(t.get("classical_time", 0.0) for t in timings)
+            total_time = sum(t.get("total_time", 0.0) for t in timings)
+            
+            timing_summary = {
+                "num_iterations": len(timings),
+                "total_quantum_time": round(quantum_time, 3),
+                "total_queue_time": round(queue_time, 3),
+                "total_classical_time": round(classical_time, 3),
+                "total_time": round(total_time, 3)
+            }
+            
+            if timing_summary:
+                timing_path = Path(constants.RESULTS_DATA_DIRPATH) / "timing_summary.json"
+                with open(timing_path, "w", encoding="utf-8") as f:
+                    json.dump(timing_summary, f, indent=2)
+                logger.info(f"[SUCCESS] 时间汇总已保存到: {timing_path}")
+                logger.info(f"  - 总迭代次数: {timing_summary['num_iterations']}")
+                logger.info(f"  - 总量子时间: {timing_summary['total_quantum_time']:.3f}s")
+                logger.info(f"  - 总队列时间: {timing_summary['total_queue_time']:.3f}s")
+                logger.info(f"  - 总经典时间: {timing_summary['total_classical_time']:.3f}s")
+                logger.info(f"  - 总时间: {timing_summary['total_time']:.3f}s")
     except Exception:
         pass
 
